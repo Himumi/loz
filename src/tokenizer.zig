@@ -566,7 +566,7 @@ fn testFailLexer(
     var buffer: [1024]u8 = undefined;
     var io_err: Io.Writer = .fixed(&buffer);
 
-    var ctx: Context = .init(undefined, undefined, .{ .err = &io_err });
+    var ctx: Context = .init(undefined, .{ .err = &io_err });
     _ = scan(gpa, &ctx, source) catch |err| {
         try testing.expectEqual(expected_error, err);
         try testing.expectEqualSlices(u8, expected_message, io_err.buffered());
@@ -577,7 +577,6 @@ const std = @import("std");
 const fmt = std.fmt;
 const mem = std.mem;
 const testing = std.testing;
-
 const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
 const Io = std.Io;

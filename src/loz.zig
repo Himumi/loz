@@ -90,9 +90,9 @@ const ArenaAllocator = heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
 const Io = std.Io;
 
-const ast_printer = @import("ast_printer.zig");
 const analyzer = @import("analyzer.zig");
-const tokenizer = @import("tokenizer.zig");
-const interpreter = @import("interpreter.zig");
+const ast_printer = @import("ast_printer.zig");
 const Context = @import("Context.zig");
+const interpreter = @import("interpreter.zig");
+const tokenizer = @import("tokenizer.zig");
 const Token = tokenizer.Token;

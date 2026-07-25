@@ -27,10 +27,7 @@ pub fn main(init: std.process.Init) !void {
     var file_reader = file.reader(io, &stdin_buffer);
     const reader = &file_reader.interface;
 
-    const env = try Env.create(gpa, null);
-    defer env.destroy();
-
-    var ctx: Context = .init(io, env, .init(stdout, stderr, reader));
+    var ctx: Context = .init(io, .init(stdout, stderr, reader));
     if (args.len == 1) {
         try loz.runPrompt(gpa, &ctx); // Run interactive prompt (REPL)
     } else {
@@ -82,7 +79,7 @@ const Allocator = mem.Allocator;
 const DebugAllocator = heap.DebugAllocator;
 const Io = std.Io;
 
+const ast = @import("ast.zig");
 const Context = @import("Context.zig");
 const Env = @import("EnvSoa.zig");
 const loz = @import("loz.zig");
-const ast = @import("ast.zig");
