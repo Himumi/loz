@@ -3,13 +3,11 @@ const Context = @This();
 io: Io,
 stream: Stream,
 status: Status,
-env: *Env,
 
-pub fn init(io: Io, env: *Env, stream: Stream) Context {
+pub fn init(io: Io, stream: Stream) Context {
     return .{
         .io = io,
         .stream = stream,
-        .env = env,
         .status = .{
             .had_error = false,
             .is_panic = false,
@@ -53,5 +51,3 @@ pub fn panic(self: *Context, comptime fmt: []const u8, args: anytype) Io.Writer.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-
-const Env = @import("EnvFlat.zig");

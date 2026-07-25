@@ -428,11 +428,14 @@ pub const Block = struct {
 
 // Raw Values //
 pub const Object = union(enum) {
+    // In Parser, It does not own the memory.
+    // In Interpreter, It owns the memory.
     string: []const u8,
     number: f64,
     boolean: bool,
     nil: void,
-    callable: Callable, // It shared pointers
+    // It stores the pointers os different lifetimes.
+    callable: Callable,
 
     pub fn deinit(self: Object, gpa: Allocator) void {
         switch (self) {
@@ -520,30 +523,53 @@ pub const Object = union(enum) {
     }
 };
 
-/// Callable referrences to heap stores in different places.
+/// Referrence to heap stores in different places.
+/// It does not have a control to release the memory.
 pub const Callable = struct {
-    // It borrowed the statement from parser.
-    // It does not have control to release the memory.
-    stmt: *Stmt,
-    // It borrowed the env from interpreter closures.
-    // It does not have control to release the memory.
-    closure: *Env,
+    // It borrowed the statement from the parser.
+    // It does not have a control to release the memory.
+    stmt: Function,
+    /// It stores the keys and values ranges.
+    closure: Closure,
 
-    pub fn init(stmt: *Stmt, closure: *Env) Callable {
+    pub fn init(fun_stmt: Function, closure: Closure) Callable {
         return .{
-            .stmt = stmt,
+            .stmt = fun_stmt,
             .closure = closure,
         };
     }
 
     pub fn arity(self: Callable) usize {
-        const fun_statement = self.stmt.fun_statement;
-        return fun_statement.params.len;
+        return self.stmt.params.len;
     }
 
     pub fn toPrint(self: Callable, writer: *Io.Writer) Io.Writer.Error!void {
-        const fun_statement = self.stmt.fun_statement;
-        try writer.print("<fn {s}>", .{fun_statement.name.lexeme});
+        try writer.print("<fn {s}>", .{self.stmt.name.lexeme});
+    }
+};
+
+/// Store the locations of the keys and values.
+pub const Closure = struct {
+    keys: Loc,
+    values: Loc,
+
+    pub const Loc = struct {
+        start: usize,
+        end: usize,
+
+        pub const empty: Loc = .{
+            .start = 0,
+            .end = 0,
+        };
+    };
+
+    pub const empty: Closure = .{
+        .keys = .empty,
+        .values = .empty,
+    };
+
+    pub fn assign(self: *Closure, closure: Closure) void {
+        self.* = closure;
     }
 };
 

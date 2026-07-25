@@ -733,10 +733,7 @@ fn testAnalyzer(source: [:0]const u8, expected: []const u8) !void {
     var stream_buffer: [256]u8 = undefined;
     var stream: Io.Writer = .fixed(&stream_buffer);
 
-    var ctx: Context = .init(io, undefined, .{
-        .out = &stream,
-        .err = &stream,
-    });
+    var ctx: Context = .init(io, .{ .out = &stream, .err = &stream });
 
     const ast_tree = try parse(gpa, &ctx, source);
     defer ast_tree.deinit(gpa);
@@ -762,7 +759,7 @@ fn testFailParser(
     var buffer: [256]u8 = undefined;
     var io_err: Io.Writer = .fixed(&buffer);
 
-    var ctx: Context = .init(undefined, undefined, .{ .err = &io_err });
+    var ctx: Context = .init(undefined, .{ .err = &io_err });
 
     _ = try parse(gpa, &ctx, source);
     try testing.expectEqualSlices(u8, expected_message, io_err.buffered());

@@ -1,54 +1,36 @@
 // I need to create union Result type for a better error message.
-pub fn render(gpa: Allocator, ctx: *Context, tree: ast.Ast) RendererError!void {
-    var render_ctx: Ctx = .init(gpa, ctx);
-    var renderer: Renderer = .empty;
-    defer renderer.deinit(gpa);
+pub fn render(gpa: Allocator, ctx: *Ctx, tree: ast.Ast) RendererError!void {
+    var renderer: Renderer = try .init(gpa);
+    defer renderer.deinit();
 
     for (tree.list) |statement| {
-        const object = try renderer.execute(&render_ctx, statement);
-        object.deinit(render_ctx.allocator);
+        const object = try renderer.execute(ctx, statement);
+        object.deinit(renderer.allocator);
     }
 }
 
-pub fn print(gpa: Allocator, ctx: *Context, tree: ast.Ast) RendererError!void {
-    var render_ctx: Ctx = .init(gpa, ctx);
-    var renderer: Renderer = .empty;
-    defer renderer.deinit(gpa);
+pub fn print(gpa: Allocator, ctx: *Ctx, tree: ast.Ast) RendererError!void {
+    var renderer: Renderer = try .init(gpa);
+    defer renderer.deinit();
 
     for (tree.list) |statement| {
-        const object = try renderer.execute(&render_ctx, statement);
-        defer object.deinit(render_ctx.allocator);
+        const object = try renderer.execute(ctx, statement);
+        defer object.deinit(renderer.allocator);
 
         if (object != .nil) {
-            try object.toPrintln(render_ctx.stream.out);
+            try object.toPrintln(ctx.stream.out);
         }
     }
 }
-
-const Ctx = struct {
-    allocator: Allocator,
-    io: Io,
-    stream: Context.Stream,
-    status: Context.Status,
-    env: *Env,
-
-    pub fn init(gpa: Allocator, ctx: *Context) Ctx {
-        return .{
-            .allocator = gpa,
-            .io = ctx.io,
-            .stream = ctx.stream,
-            .status = ctx.status,
-            .env = ctx.env,
-        };
-    }
-};
 
 pub const RendererError = Error || Io.Writer.Error || Allocator.Error || Env.Error;
 
 const Renderer = @This();
 
+allocator: Allocator,
 had_return: ?ast.Object = null,
-closures: ArrayList(*Env) = .empty, // Stores closures pointers.
+closures: *Env,
+env: *Env,
 
 const Error = error{
     InvalidBinaryOperands,
@@ -57,16 +39,25 @@ const Error = error{
     ExpectedCallable,
 };
 
-pub const empty: Renderer = .{
-    .had_return = null,
-    .closures = .empty,
-};
+pub fn init(gpa: Allocator) Allocator.Error!Renderer {
+    const global_env = try Env.create(gpa);
+    errdefer global_env.deinit(gpa);
 
-pub fn deinit(self: *Renderer, gpa: Allocator) void {
-    for (self.closures.items) |closure| {
-        closure.destroy();
+    const closures = try Env.create(gpa);
+    errdefer closures.deinit(gpa);
+    return .{
+        .allocator = gpa,
+        .env = global_env,
+        .closures = closures,
+    };
+}
+
+pub fn deinit(self: *Renderer) void {
+    if (self.had_return) |result| {
+        result.deinit(self.allocator);
     }
-    self.closures.deinit(gpa);
+    self.env.destroy(self.allocator);
+    self.closures.destroy(self.allocator);
 }
 
 // Statements //
@@ -74,7 +65,7 @@ pub fn deinit(self: *Renderer, gpa: Allocator) void {
 pub fn execute(self: *Renderer, ctx: *Ctx, stmt: *ast.Stmt) RendererError!ast.Object {
     return switch (stmt.*) {
         .expr_statement => |expr_stmt| try self.evaluate(ctx, expr_stmt.expression),
-        .fun_statement => try funStatement(ctx, stmt),
+        .fun_statement => |fun_stmt| try self.funStatement(fun_stmt),
         .if_statement => |if_stmt| try self.ifStatement(ctx, if_stmt),
         .print_statement => |print_stmt| try self.printStatement(ctx, print_stmt),
         .return_statement => |return_stmt| try self.returnStatement(ctx, return_stmt),
@@ -84,19 +75,18 @@ pub fn execute(self: *Renderer, ctx: *Ctx, stmt: *ast.Stmt) RendererError!ast.Ob
     };
 }
 
-fn funStatement(ctx: *Ctx, stmt: *ast.Stmt) RendererError!ast.Object {
-    if (stmt.* == .fun_statement) {
-        try ctx.env.define(stmt.fun_statement.name.lexeme, .{
-            // It borrowed statement and current env.
-            .callable = .init(stmt, ctx.env),
-        });
-    }
+fn funStatement(self: *Renderer, fun_stmt: ast.Function) RendererError!ast.Object {
+    // Transfer the object ownership to Env.
+    try self.env.define(self.allocator, fun_stmt.name.lexeme, .{
+        // It borrowed statement and set closure to empty.
+        .callable = .init(fun_stmt, .empty),
+    });
     return .nil;
 }
 
 fn ifStatement(self: *Renderer, ctx: *Ctx, if_stmt: ast.IF) RendererError!ast.Object {
     const condition = try self.evaluate(ctx, if_stmt.condition);
-    defer condition.deinit(ctx.allocator);
+    defer condition.deinit(self.allocator);
 
     if (isTruthy(condition)) {
         return try self.execute(ctx, if_stmt.then_stmt);
@@ -108,7 +98,7 @@ fn ifStatement(self: *Renderer, ctx: *Ctx, if_stmt: ast.IF) RendererError!ast.Ob
 
 fn printStatement(self: *Renderer, ctx: *Ctx, print_stmt: ast.Print) RendererError!ast.Object {
     const object = try self.evaluate(ctx, print_stmt.expression);
-    defer object.deinit(ctx.allocator);
+    defer object.deinit(self.allocator);
 
     try object.toPrintln(ctx.stream.out);
     return .nil;
@@ -123,10 +113,10 @@ fn returnStatement(self: *Renderer, ctx: *Ctx, return_stmt: ast.Return) Renderer
         }
     };
     if (self.had_return) |return_value| {
-        return_value.deinit(ctx.allocator);
+        return_value.deinit(self.allocator);
     }
+    // Transfer the object ownership to self.had_return.
     self.had_return = object;
-
     return .nil;
 }
 
@@ -137,21 +127,21 @@ fn varStatement(self: *Renderer, ctx: *Ctx, var_stmt: ast.Var) RendererError!ast
         }
         break :blk .nil;
     };
-    errdefer object.deinit(ctx.allocator);
-    // The caller reponsibles for the value memory.
-    try ctx.env.define(var_stmt.name.lexeme, object);
-    return object;
+    errdefer object.deinit(self.allocator);
+    // Transfer the object ownership.
+    try self.env.define(self.allocator, var_stmt.name.lexeme, object);
+    return object.dupe(self.allocator);
 }
 
 fn whileStatement(self: *Renderer, ctx: *Ctx, while_stmt: ast.While) RendererError!ast.Object {
     while (true) {
         const condition = try self.evaluate(ctx, while_stmt.condition);
-        defer condition.deinit(ctx.allocator);
+        defer condition.deinit(self.allocator);
 
         if (!isTruthy(condition)) break;
 
         const object = try self.execute(ctx, while_stmt.body);
-        defer object.deinit(ctx.allocator);
+        defer object.deinit(self.allocator);
     }
     return .nil;
 }
@@ -159,7 +149,7 @@ fn whileStatement(self: *Renderer, ctx: *Ctx, while_stmt: ast.While) RendererErr
 fn blockStatement(self: *Renderer, ctx: *Ctx, block_stmt: ast.Block) RendererError!ast.Object {
     for (block_stmt.list) |value_statement| {
         const object = try self.execute(ctx, value_statement);
-        defer object.deinit(ctx.allocator);
+        defer object.deinit(self.allocator);
 
         if (self.had_return) |result| {
             self.had_return = null;
@@ -177,19 +167,19 @@ fn evaluate(self: *Renderer, ctx: *Ctx, exp: *ast.Expr) RendererError!ast.Object
         .call => |call| try self.callExpression(ctx, call),
         .grouping => |group| try self.evaluate(ctx, group.expression),
         .unary => |unary| self.unaryExpression(ctx, unary),
-        .literal => |literal| try literal.value.dupe(ctx.allocator),
+        .literal => |literal| try literal.value.dupe(self.allocator),
         .logical => |logical| try self.logicalExpression(ctx, logical),
-        .variable => |variable| try variableExpression(ctx, variable),
+        .variable => |variable| try self.variableExpression(variable),
         .assign => |assign| try self.assignExpression(ctx, assign),
     };
 }
 
 fn binaryExpression(self: *Renderer, ctx: *Ctx, binary: ast.Binary) RendererError!ast.Object {
     const left = try self.evaluate(ctx, binary.left);
-    defer left.deinit(ctx.allocator);
+    defer left.deinit(self.allocator);
 
     const right = try self.evaluate(ctx, binary.right);
-    defer right.deinit(ctx.allocator);
+    defer right.deinit(self.allocator);
 
     if (binary.operator.tag == .plus) {
         if (left.isNumber() and right.isNumber()) {
@@ -197,7 +187,7 @@ fn binaryExpression(self: *Renderer, ctx: *Ctx, binary: ast.Binary) RendererErro
         }
         if (left.isString() and right.isString()) {
             return .{
-                .string = try mem.concat(ctx.allocator, u8, &.{
+                .string = try mem.concat(self.allocator, u8, &.{
                     left.string,
                     right.string,
                 }),
@@ -205,7 +195,7 @@ fn binaryExpression(self: *Renderer, ctx: *Ctx, binary: ast.Binary) RendererErro
         }
         if (left.isString() and right.isNumber()) {
             return .{
-                .string = try fmt.allocPrint(ctx.allocator, "{s}{}", .{
+                .string = try fmt.allocPrint(self.allocator, "{s}{}", .{
                     left.string,
                     right.number,
                 }),
@@ -251,30 +241,24 @@ fn binaryExpression(self: *Renderer, ctx: *Ctx, binary: ast.Binary) RendererErro
 
 fn callExpression(self: *Renderer, ctx: *Ctx, call: ast.Call) RendererError!ast.Object {
     var callee = try self.evaluate(ctx, call.callee);
-    defer callee.deinit(ctx.allocator);
+    defer callee.deinit(self.allocator);
 
-    if (!callee.isCallable()) {
-        return error.ExpectedCallable;
-    }
+    if (!callee.isCallable()) return error.ExpectedCallable;
 
-    var list: ArrayList(ast.Object) = try .initCapacity(ctx.allocator, call.args.len);
-    defer {
-        for (list.items) |item| {
-            item.deinit(ctx.allocator);
-        }
-        list.deinit(ctx.allocator);
-    }
+    var list: ArrayList(ast.Object) = try .initCapacity(self.allocator, call.args.len);
+    defer list.deinit(self.allocator);
+    errdefer for (list.items) |item| item.deinit(self.allocator);
 
     for (call.args) |arg| {
         const object = try self.evaluate(ctx, arg);
-        errdefer object.deinit(ctx.allocator);
-        try list.append(ctx.allocator, object);
+        errdefer object.deinit(self.allocator);
+        try list.append(self.allocator, object);
     }
 
     if (list.items.len != callee.callable.arity()) {
         return error.InvalidFunctionArity;
     }
-
+    // Transfer the objects ownership. not the container.
     return try self.callFn(ctx, callee.callable, list.items);
 }
 
@@ -284,43 +268,71 @@ fn callFn(
     callable: ast.Callable,
     args: []const ast.Object,
 ) RendererError!ast.Object {
-    const global_env = ctx.env;
-    defer ctx.env = global_env;
-
-    var fun_env = callable.closure;
-    fun_env.enclosing = global_env;
-    defer fun_env.enclosing = null;
-
-    const local_env = try Env.create(ctx.allocator, fun_env);
-    ctx.env = local_env;
-
-    switch (callable.stmt.*) {
-        .fun_statement => |fun_statement| {
-            for (fun_statement.params, 0..) |param, i| {
-                try ctx.env.define(param.lexeme, args[i]);
-            }
-            var block: ast.Stmt = .{ .block_statement = fun_statement.body };
-
-            const object = try self.execute(ctx, &block);
-            errdefer object.deinit(ctx.allocator);
-
-            if (object != .callable) {
-                // It does not need the local env anymore.
-                local_env.destroy();
-            } else {
-                // It needs the local env for closures.
-                try self.closures.append(ctx.allocator, local_env);
-            }
-            return object;
-        },
-        else => {},
+    const closure_index = self.env.len();
+    // Transfer the closure memory to global env.
+    try self.env.append(self.allocator, try self.closures.slice(callable.closure));
+    // The closures slices memory has become invalid.
+    const local_index = self.env.len();
+    for (callable.stmt.params, 0..) |param, i| {
+        try self.env.define(self.allocator, param.lexeme, args[i]);
     }
-    return .nil;
+
+    var block: ast.Stmt = .{ .block_statement = callable.stmt.body };
+    var object = try self.execute(ctx, &block);
+    errdefer object.deinit(self.allocator);
+
+    // Steal the local keys and values from global env.
+    const local = try self.env.steal(self.allocator, local_index);
+    defer local.deinit(self.allocator);
+
+    // Validate return object.
+    if (object == .callable) {
+        // Transfer the local ownership to interpreter's closures.
+        const local_loc = try self.appendClosure(local);
+        object.callable.closure.assign(local_loc);
+
+        // Transfer the object ownership to interpreter's closures.
+        const object_key = object.callable.stmt.name.lexeme;
+        try self.closures.assign(self.allocator, object_key, object);
+    } else {
+        for (local.values) |value| {
+            // Release the objects if it is not a function.
+            value.deinit(self.allocator);
+        }
+    }
+
+    // Steal the function's closure ownership.
+    const new_closure = try self.env.steal(self.allocator, closure_index);
+    defer new_closure.deinit(self.allocator);
+
+    // Transfer the new memory to invalid location.
+    try self.closures.replace(callable.closure, new_closure);
+    return try object.dupe(self.allocator);
+}
+
+fn appendClosure(self: *Renderer, local: Env.Local) !ast.Closure {
+    var closure: ast.Closure = .{
+        .keys = .{
+            .start = self.closures.keys.items.len,
+            .end = 0,
+        },
+        .values = .{
+            .start = self.closures.values.items.len,
+            .end = 0,
+        },
+    };
+    // Transfer the local ownership to interpreter's closures.
+    try self.closures.append(self.allocator, local);
+    // Add the end bound.
+    closure.keys.end = self.closures.keys.items.len;
+    closure.values.end = self.closures.values.items.len;
+
+    return closure;
 }
 
 fn unaryExpression(self: *Renderer, ctx: *Ctx, unary: ast.Unary) RendererError!ast.Object {
     const right = try self.evaluate(ctx, unary.right);
-    defer right.deinit(ctx.allocator);
+    defer right.deinit(self.allocator);
 
     if (unary.operator.tag == .bang) {
         return .{ .boolean = !isTruthy(right) };
@@ -336,29 +348,30 @@ fn unaryExpression(self: *Renderer, ctx: *Ctx, unary: ast.Unary) RendererError!a
 
 fn logicalExpression(self: *Renderer, ctx: *Ctx, logical: ast.Logical) RendererError!ast.Object {
     const left = try self.evaluate(ctx, logical.left);
-    errdefer left.deinit(ctx.allocator);
+    errdefer left.deinit(self.allocator);
 
     if (logical.operator.tag == .keyword_or) {
         if (isTruthy(left)) return left;
     } else {
         if (!isTruthy(left)) return left;
     }
-    left.deinit(ctx.allocator);
+
+    left.deinit(self.allocator);
     return try self.evaluate(ctx, logical.right);
 }
 
-fn variableExpression(ctx: *Ctx, variable: ast.Variable) RendererError!ast.Object {
-    // The object belongs to Env.
-    const object = try ctx.env.get(variable.name.lexeme);
-    return try object.dupe(ctx.allocator);
+fn variableExpression(self: *Renderer, variable: ast.Variable) RendererError!ast.Object {
+    // The object belongs interpreter's env.
+    const object = try self.env.get(variable.name.lexeme);
+    return try object.dupe(self.allocator);
 }
 
 fn assignExpression(self: *Renderer, ctx: *Ctx, assign: ast.Assign) RendererError!ast.Object {
     const object = try self.evaluate(ctx, assign.value);
-    errdefer object.deinit(ctx.allocator);
-    // Duplicate the key and value using Env allocator inside the function.
-    try ctx.env.assign(assign.name.lexeme, object);
-    return object;
+    errdefer object.deinit(self.allocator);
+    // Transfer the object ownership to interpreter's env.
+    try self.env.assign(self.allocator, assign.name.lexeme, object);
+    return try object.dupe(self.allocator);
 }
 
 // Truthy values are numbers, strings, and true.
@@ -571,31 +584,20 @@ fn testInterpreter(
 ) !void {
     const gpa = testing.allocator;
 
-    var env: Env = .init(gpa);
-    defer env.deinit();
-
     var buffer: [1024]u8 = undefined;
     var io_out: Io.Writer = .fixed(&buffer);
 
-    var ctx: Context = .init(undefined, &env, .{ .out = &io_out, .err = &io_out });
+    var ctx: Ctx = .init(undefined, .{ .out = &io_out, .err = &io_out });
 
     const stmt_list = try analyzer.parse(gpa, &ctx, source);
     defer stmt_list.deinit(gpa);
 
-    var renderCtx: Ctx = .{
-        .allocator = gpa,
-        .env = ctx.env,
-        .io = undefined,
-        .status = ctx.status,
-        .stream = ctx.stream,
-    };
-
-    var renderer: Renderer = .empty;
-    defer renderer.deinit(gpa);
+    var renderer: Renderer = try .init(gpa);
+    defer renderer.deinit();
 
     for (stmt_list.list) |stmt| {
-        const object = try renderer.execute(&renderCtx, stmt);
-        defer object.deinit(renderCtx.allocator);
+        const object = try renderer.execute(&ctx, stmt);
+        defer object.deinit(renderer.allocator);
 
         if (object != .nil) {
             try object.toPrint(&io_out);
@@ -617,7 +619,7 @@ const Io = std.Io;
 
 const analyzer = @import("analyzer.zig");
 const ast = @import("ast.zig");
-const Context = @import("Context.zig");
+const Ctx = @import("Context.zig");
 const Env = @import("EnvFlat.zig");
 const tokenizer = @import("tokenizer.zig");
 const Token = tokenizer.Token;
