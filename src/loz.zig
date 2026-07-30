@@ -4,11 +4,14 @@ fn run(gpa: Allocator, ctx: *Context, source: [:0]const u8, is_repl: bool) !void
 
     // Borrewed ast_tree to interpreter.
     const ast_tree = try analyzer.parse(arena_allocator.allocator(), ctx, source);
+    const locals = try resolver.resolve(arena_allocator.allocator(), ctx, ast_tree.list);
+
+    if (ctx.status.had_error) return;
 
     if (is_repl) {
-        try interpreter.print(gpa, ctx, ast_tree);
+        try interpreter.print(gpa, ctx, ast_tree, locals);
     } else {
-        try interpreter.render(gpa, ctx, ast_tree);
+        try interpreter.render(gpa, ctx, ast_tree, locals);
     }
 }
 
@@ -94,5 +97,6 @@ const analyzer = @import("analyzer.zig");
 const ast_printer = @import("ast_printer.zig");
 const Context = @import("Context.zig");
 const interpreter = @import("interpreter.zig");
+const resolver = @import("resolver.zig");
 const tokenizer = @import("tokenizer.zig");
 const Token = tokenizer.Token;

@@ -61,6 +61,24 @@ pub fn assign(self: *EnvSoa, gpa: Allocator, name: []const u8, value: ast.Object
     return error.UndefinedVariable;
 }
 
+pub fn assignAt(
+    self: *EnvSoa,
+    gpa: Allocator,
+    distance: usize,
+    name: []const u8,
+    value: ast.Object,
+) !void {
+    var env = self;
+    for (0..distance) |_| {
+        if (self.enclosing) |enclosing| {
+            env = enclosing;
+        } else {
+            break;
+        }
+    }
+    return try self.assign(gpa, name, value);
+}
+
 /// Needs to duplicate if it will be used in different lifetimes.
 pub fn get(self: *EnvSoa, name: []const u8) !ast.Object {
     var it = self.iterator();
@@ -74,6 +92,19 @@ pub fn get(self: *EnvSoa, name: []const u8) !ast.Object {
         return try enclosing.get(name);
     }
     return error.UndefinedVariable;
+}
+
+/// Needs to duplicate if it will be used in different lifetimes.
+pub fn getAt(self: *EnvSoa, distance: usize, name: []const u8) !ast.Object {
+    var env = self;
+    for (0..distance) |_| {
+        if (self.enclosing) |enclosing| {
+            env = enclosing;
+        } else {
+            break;
+        }
+    }
+    return try env.get(name);
 }
 
 pub fn iterator(self: *EnvSoa) KeyIterator {
