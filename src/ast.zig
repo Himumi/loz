@@ -19,25 +19,31 @@ pub const Ast = struct {
 pub const Expr = union(enum) {
     binary: Binary,
     call: Call,
+    get: Get,
     grouping: Grouping,
     unary: Unary,
     literal: Literal,
     logical: Logical,
+    set: Set,
     variable: Variable,
     assign: Assign,
+    this: This,
 
     pub fn destroy(self: *Expr, gpa: Allocator) void {
         switch (self.*) {
-            .binary => |binary| binary.deinit(gpa),
-            .call => |call| call.deinit(gpa),
-            .grouping => |group| group.deinit(gpa),
-            .unary => |unary| unary.deinit(gpa),
             // It does not need to destroy Value in literal and variable expressions.
             // Expr only lives in parser lifetime not runtime lifetime.
             .literal,
             .variable,
+            .this,
             => {},
+            .binary => |binary| binary.deinit(gpa),
+            .call => |call| call.deinit(gpa),
+            .get => |get| get.deinit(gpa),
+            .grouping => |group| group.deinit(gpa),
+            .unary => |unary| unary.deinit(gpa),
             .logical => |logical| logical.deinit(gpa),
+            .set => |set| set.deinit(gpa),
             .assign => |assign| assign.deinit(gpa),
         }
         gpa.destroy(self);
@@ -97,6 +103,28 @@ pub const Call = struct {
         const call_exp = try gpa.create(Expr);
         call_exp.* = .{ .call = call };
         return call_exp;
+    }
+};
+
+pub const Get = struct {
+    name: Token,
+    object: *Expr,
+
+    pub fn init(name: Token, object: *Expr) Get {
+        return .{
+            .name = name,
+            .object = object,
+        };
+    }
+
+    pub fn deinit(self: Get, gpa: Allocator) void {
+        self.object.destroy(gpa);
+    }
+
+    pub fn create(gpa: Allocator, name: Token, object: *Expr) Allocator.Error!*Expr {
+        const get_exp = try gpa.create(Expr);
+        get_exp.* = .{ .get = .init(name, object) };
+        return get_exp;
     }
 };
 
@@ -181,6 +209,31 @@ pub const Logical = struct {
     }
 };
 
+pub const Set = struct {
+    object: *Expr,
+    name: Token,
+    value: *Expr,
+
+    pub fn init(object: *Expr, name: Token, value: *Expr) Set {
+        return .{
+            .object = object,
+            .name = name,
+            .value = value,
+        };
+    }
+
+    pub fn deinit(self: Set, gpa: Allocator) void {
+        self.object.destroy(gpa);
+        self.value.destroy(gpa);
+    }
+
+    pub fn create(gpa: Allocator, object: *Expr, name: Token, value: *Expr) Allocator.Error!*Expr {
+        const set_exp = try gpa.create(Expr);
+        set_exp.* = .{ .set = .init(object, name, value) };
+        return set_exp;
+    }
+};
+
 pub const Variable = struct {
     name: Token,
 
@@ -214,6 +267,20 @@ pub const Assign = struct {
     }
 };
 
+pub const This = struct {
+    name: Token,
+
+    pub fn init(name: Token) This {
+        return .{ .name = name };
+    }
+
+    pub fn create(gpa: Allocator, name: Token) Allocator.Error!*Expr {
+        const this = try gpa.create(Expr);
+        this.* = .{ .this = .init(name) };
+        return this;
+    }
+};
+
 // Statement //
 
 pub const Stmt = union(enum) {
@@ -225,6 +292,7 @@ pub const Stmt = union(enum) {
     var_statement: Var,
     while_statement: While,
     block_statement: Block,
+    class_statement: Class,
 
     pub fn destroy(self: *Stmt, gpa: Allocator) void {
         switch (self.*) {
@@ -236,6 +304,7 @@ pub const Stmt = union(enum) {
             .var_statement => |var_statement| var_statement.deinit(gpa),
             .while_statement => |while_statemnet| while_statemnet.deinit(gpa),
             .block_statement => |block_statement| block_statement.deinit(gpa),
+            .class_statement => |class_statement| class_statement.deinit(gpa),
         }
         gpa.destroy(self);
     }
@@ -426,13 +495,39 @@ pub const Block = struct {
     }
 };
 
+pub const Class = struct {
+    name: Token,
+    methods: []const *Stmt,
+
+    pub fn init(name: Token, methods: []const *Stmt) Class {
+        return .{
+            .name = name,
+            .methods = methods,
+        };
+    }
+
+    pub fn deinit(self: Class, gpa: Allocator) void {
+        for (self.methods) |method| {
+            method.destroy(gpa);
+        }
+        gpa.free(self.methods);
+    }
+
+    pub fn create(gpa: Allocator, class: Class) Allocator.Error!*Stmt {
+        const class_statement = try gpa.create(Stmt);
+        class_statement.* = .{ .class_statement = class };
+        return class_statement;
+    }
+};
+
 // Raw Values //
 pub const Object = union(enum) {
     string: []const u8,
     number: f64,
     boolean: bool,
     nil: void,
-    callable: Callable, // It shared pointers
+    callable: Callable,
+    instance: Instance,
 
     pub fn deinit(self: Object, gpa: Allocator) void {
         switch (self) {
@@ -487,13 +582,18 @@ pub const Object = union(enum) {
         return self == .callable;
     }
 
+    pub fn isInstance(self: Object) bool {
+        return self == .instance;
+    }
+
     pub fn isSameTypeWith(self: Object, b: Object) bool {
         const is_boolean = self.isBoolean() and b.isBoolean();
         const is_number = self.isNumber() and b.isNumber();
         const is_string = self.isString() and b.isString();
         const is_nil = self.isNil() and b.isNil();
         const is_callable = self.isCallable() and b.isCallable();
-        return is_boolean or is_number or is_string or is_nil or is_callable;
+        const is_instance = self.isInstance() and b.isInstance();
+        return is_boolean or is_number or is_string or is_nil or is_callable or is_instance;
     }
 
     pub fn toPrint(self: Object, writer: *Io.Writer) Io.Writer.Error!void {
@@ -502,48 +602,113 @@ pub const Object = union(enum) {
             .number => |number| try writer.print("{d}", .{number}),
             .boolean => |boolean| try writer.print("{}", .{boolean}),
             .callable => |callable| try callable.toPrint(writer),
+            .instance => |instance| try instance.toPrint(writer),
             .nil => try writer.writeAll("nil"),
         };
     }
 
     pub fn toPrintln(self: Object, writer: *Io.Writer) Io.Writer.Error!void {
-        return switch (self) {
-            .string => |string| try writer.print("{s}\n", .{string}),
-            .number => |number| try writer.print("{d}\n", .{number}),
-            .boolean => |boolean| try writer.print("{}\n", .{boolean}),
-            .callable => |callable| {
-                try callable.toPrint(writer);
-                try writer.writeByte('\n');
-            },
-            .nil => try writer.writeAll("nil\n"),
-        };
+        try self.toPrint(writer);
+        try writer.writeByte('\n');
     }
 };
 
 /// Callable referrences to heap stores in different places.
-pub const Callable = struct {
-    // It borrowed the statement from parser.
-    // It does not have control to release the memory.
-    stmt: *Stmt,
-    // It borrowed the env from interpreter closures.
-    // It does not have control to release the memory.
-    closure: *Env,
+pub const Callable = union(enum) {
+    fun: FunCall,
+    class: ClassCall,
 
-    pub fn init(stmt: *Stmt, closure: *Env) Callable {
-        return .{
-            .stmt = stmt,
-            .closure = closure,
+    pub fn arity(self: Callable) usize {
+        return switch (self) {
+            .fun => |fun| fun.arity,
+            .class => |class| class.arity,
         };
     }
 
-    pub fn arity(self: Callable) usize {
-        const fun_statement = self.stmt.fun_statement;
-        return fun_statement.params.len;
+    pub fn toPrint(self: Callable, writer: *Io.Writer) Io.Writer.Error!void {
+        switch (self) {
+            .fun => |fun| try fun.toPrint(writer),
+            .class => |class| try class.toPrint(writer),
+        }
+    }
+};
+
+pub const FunCall = struct {
+    // It borrowed the statement from parser.
+    // It does not have control to release the memory.
+    stmt: *Stmt,
+    arity: usize,
+    // It borrowed the env from interpreter closures.
+    // It does not have control to release the memory.
+    closure: *Env,
+    is_init: bool,
+
+    pub fn init(stmt: *Stmt, arity: usize, closure: *Env, is_init: bool) FunCall {
+        return .{
+            .stmt = stmt,
+            .arity = arity,
+            .closure = closure,
+            .is_init = is_init,
+        };
     }
 
-    pub fn toPrint(self: Callable, writer: *Io.Writer) Io.Writer.Error!void {
-        const fun_statement = self.stmt.fun_statement;
-        try writer.print("<fn {s}>", .{fun_statement.name.lexeme});
+    pub fn toPrint(self: FunCall, writer: *Io.Writer) Io.Writer.Error!void {
+        if (self.stmt.* == .fun_statement) {
+            const fun_stmt = self.stmt.fun_statement;
+            return try writer.print("<fn {s}>", .{fun_stmt.name.lexeme});
+        }
+        // return try writer.print(
+        //     "Invalid Stmt type: must be a Function but got a {}\n",
+        //     .{@typeName(self.stmt)},
+        // );
+    }
+};
+
+pub const ClassCall = struct {
+    // It borrowed the statement from parser.
+    // It does not have control to release the memory.
+    stmt: *Stmt,
+    arity: usize,
+    // It borrowed the fields from interpreter methods.
+    methods: usize,
+
+    pub fn init(stmt: *Stmt, arity: usize, methods: usize) ClassCall {
+        return .{
+            .stmt = stmt,
+            .arity = arity,
+            .methods = methods,
+        };
+    }
+
+    pub fn toPrint(self: ClassCall, writer: *Io.Writer) Io.Writer.Error!void {
+        if (self.stmt.* == .class_statement) {
+            const class_stmt = self.stmt.class_statement;
+            try writer.print("<class {s}>", .{class_stmt.name.lexeme});
+        }
+        // return try writer.print(
+        //     "Invalid Stmt type: must be a Class but got a {}\n",
+        //     .{@typeName(self.stmt.*)},
+        // );
+    }
+};
+
+pub const Instance = struct {
+    // Class
+    stmt: *Stmt,
+    fields: usize,
+    methods: usize,
+
+    pub fn init(stmt: *Stmt, fields: usize, methods: usize) Instance {
+        return .{
+            .fields = fields,
+            .methods = methods,
+            .stmt = stmt,
+        };
+    }
+
+    pub fn toPrint(self: Instance, writer: *Io.Writer) Io.Writer.Error!void {
+        const class_stmt = self.stmt.class_statement;
+        try writer.print("<{s} instance>", .{class_stmt.name.lexeme});
     }
 };
 
@@ -553,6 +718,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
 const Io = std.Io;
+const StringHashMap = std.StringHashMap;
 
 const Context = @import("Context.zig");
 const Env = @import("EnvSoa.zig");

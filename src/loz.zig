@@ -4,14 +4,14 @@ fn run(gpa: Allocator, ctx: *Context, source: [:0]const u8, is_repl: bool) !void
 
     // Borrewed ast_tree to interpreter.
     const ast_tree = try analyzer.parse(arena_allocator.allocator(), ctx, source);
-    const locals = try resolver.resolve(arena_allocator.allocator(), ctx, ast_tree.list);
+    const resolved = try resolver.resolve(arena_allocator.allocator(), ctx, ast_tree.list);
 
     if (ctx.status.had_error) return;
 
     if (is_repl) {
-        try interpreter.print(gpa, ctx, ast_tree, locals);
+        try interpreter.print(gpa, ctx, ast_tree, resolved);
     } else {
-        try interpreter.render(gpa, ctx, ast_tree, locals);
+        try interpreter.render(gpa, ctx, ast_tree, resolved);
     }
 }
 

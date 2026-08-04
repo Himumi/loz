@@ -24,7 +24,9 @@ pub const Analyzer = struct {
         ExpectedSemicolon,
         ExpectedVariableName,
         ExpectedFunctionName,
+        ExpectedClassName,
         ExpectedParameterName,
+        ExpectedPropertyName,
         InvalidAssignmentTarget,
         TooManyArguments,
         TooManyParameters,
@@ -73,6 +75,10 @@ pub const Analyzer = struct {
             .keyword_fun => {
                 self.current = try self.lexer.next();
                 return try self.funDeclaration(gpa, ctx);
+            },
+            .keyword_class => {
+                self.current = try self.lexer.next();
+                return try self.classDeclaration(gpa, ctx);
             },
             else => return self.statement(gpa, ctx),
         }
@@ -133,6 +139,33 @@ pub const Analyzer = struct {
             }
         }
         return try list_params.toOwnedSlice(gpa);
+    }
+
+    fn classDeclaration(self: *Analyzer, gpa: Allocator, ctx: *Context) AnalyzerError!*ast.Stmt {
+        const name = self.current;
+        try self.consume(.identifier, error.ExpectedClassName);
+        try self.consume(.left_brace, error.ExpectedLeftBrace);
+
+        var list: ArrayList(*ast.Stmt) = .empty;
+        defer {
+            for (list.items) |item| item.destroy(gpa);
+            list.deinit(gpa);
+        }
+
+        while (self.current.tag != .right_brace and self.current.tag != .eof) {
+            const method = try self.funDeclaration(gpa, ctx);
+            errdefer method.destroy(gpa);
+            try list.append(gpa, method);
+        }
+        try self.consume(.right_brace, error.ExpectedRightBrace);
+
+        const methods = try list.toOwnedSlice(gpa);
+        errdefer {
+            for (methods) |method| method.destroy(gpa);
+            gpa.free(methods);
+        }
+
+        return try ast.Class.create(gpa, .init(name, methods));
     }
 
     // Statemnets //
@@ -325,13 +358,15 @@ pub const Analyzer = struct {
         if (self.current.tag == .equal) {
             self.current = try self.lexer.next();
 
+            const value = try self.assignment(gpa, ctx);
+            errdefer value.destroy(gpa);
+
             if (left.* == .variable) {
                 defer left.destroy(gpa);
-
-                const value = try self.assignment(gpa, ctx);
-                errdefer value.destroy(gpa);
-
                 return try ast.Assign.create(gpa, left.variable.name, value);
+            } else if (left.* == .get) {
+                defer gpa.destroy(left);
+                return try ast.Set.create(gpa, left.get.object, left.get.name, value);
             }
             try self.report(ctx, error.InvalidAssignmentTarget);
         }
@@ -499,7 +534,15 @@ pub const Analyzer = struct {
                     const paren = self.current;
                     try self.consume(.right_paren, error.ExpectedRightParen);
 
-                    return try ast.Call.create(gpa, .init(exp, paren, args));
+                    exp = try ast.Call.create(gpa, .init(exp, paren, args));
+                },
+                .dot => {
+                    self.current = try self.lexer.next();
+
+                    const name = self.current;
+                    try self.consume(.identifier, error.ExpectedPropertyName);
+
+                    exp = try ast.Get.create(gpa, name, exp);
                 },
                 else => break,
             }
@@ -545,6 +588,10 @@ pub const Analyzer = struct {
             .keyword_nil => {
                 self.current = try self.lexer.next();
                 return try ast.Literal.create(gpa, .nil);
+            },
+            .keyword_this => {
+                self.current = try self.lexer.next();
+                return try ast.This.create(gpa, token);
             },
             .string => {
                 self.current = try self.lexer.next();
@@ -718,12 +765,35 @@ test "succeeds analyzer" {
 
     try testAnalyzer(
         \\ fun greet() { print "hello"; }
-    , "");
+    , "(fun greet (print hello))");
 
     // Return Statement
     try testAnalyzer(
         \\ return "hello";
     , "(return hello)");
+
+    // Class Statement.
+    try testAnalyzer(
+        \\ class DevonshireCream {
+        \\   serveOn() {
+        \\     return "Scones";
+        \\   }
+        \\ }
+    , "(class DevonshireCream (fun serveOn (return Scones)))");
+
+    // Get Expression.
+    try testAnalyzer(
+        \\ user.name.first;
+    , "(get first (get name user))");
+
+    // Set Expression
+    try testAnalyzer(
+        \\ user.name.first = "John";
+    , "(set first (get name user) John)");
+
+    try testAnalyzer(
+        \\ Bacon().eat();
+    , "(call (get eat (call Bacon ')')) ')')");
 }
 
 fn testAnalyzer(source: [:0]const u8, expected: []const u8) !void {

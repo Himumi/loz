@@ -2,11 +2,14 @@
 
 - program    -> declaration* end_of_file ;
 
-- declaration   -> fun_declaration
+- declaration   -> class_declaration
+                 | fun_declaration
                  | var_declaration
                  | statement ;
 - var_declaration  -> "var" IDENTIFIER ( "=" expression )? ";" ;
 - fun_declaration -> "fun" function ;
+- class_declaration -> "class" IDENTIFIER "{" function* "}" ;
+
 - function -> IDENTIFIER "(" parameters? ")" block_statement ;
 - parameters -> IDENTIFIER ( "," IDENTIFIER )* ;
 
@@ -29,7 +32,7 @@
 - return_statement -> "return" expression? ";" ;
 
 - expression   -> assignment ;
-- assignment   -> IDENTIFIER "=" assignment
+- assignment   -> ( call "." )? IDENTIFIER "=" assignment
                 | logic_or ;
 
 - logic_or    -> logic_and ( "or" logic_and)* ;
@@ -41,7 +44,7 @@
 - factor    -> unary ( ( "/" | "*" ) unary )* ;
 - unary     -> ( "!" | "-" ) unary
              | call ;
-- call     -> primary ( "(" arguments? ")" )* ;
+- call     -> primary ( "(" arguments? ")" | "." IDENTIFIER )* ;
 - arguments -> expression ( "," expression )* ;
 - primary    -> "true" | "false" | "nil"
               | NUMBER | STRING

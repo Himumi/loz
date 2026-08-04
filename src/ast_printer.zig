@@ -30,6 +30,9 @@ pub const Printer = struct {
                 }
                 try writer.writeByte(')');
             },
+            .get => |get| {
+                try self.parenthesize(writer, "get {s}", .{get.name.lexeme}, &.{get.object});
+            },
             .grouping => |group| {
                 try self.parenthesize(writer, "group", .{}, &.{group.expression});
             },
@@ -47,6 +50,12 @@ pub const Printer = struct {
                     logical.right,
                 });
             },
+            .set => |set| {
+                try self.parenthesize(writer, "set {s}", .{set.name.lexeme}, &.{
+                    set.object,
+                    set.value,
+                });
+            },
             .variable => |variable| {
                 try writer.writeAll(variable.name.lexeme);
             },
@@ -54,6 +63,9 @@ pub const Printer = struct {
                 try self.parenthesize(writer, "assign {s}", .{assign.name.lexeme}, &.{
                     assign.value,
                 });
+            },
+            .this => |this| {
+                try self.parenthesize(writer, "this {s}", .{this.name.lexeme}, &.{});
             },
         };
     }
@@ -63,7 +75,14 @@ pub const Printer = struct {
             .expr_statement => |expr_statement| {
                 try self.printExpr(writer, expr_statement.expression);
             },
-            .fun_statement => {},
+            .fun_statement => |fun_statement| {
+                try self.parenthesizeStmt(
+                    writer,
+                    "fun {s}",
+                    .{fun_statement.name.lexeme},
+                    fun_statement.body.list,
+                );
+            },
             .if_statement => |if_statement| {
                 var condition_stmt: ast.Stmt = .{ .expr_statement = .init(if_statement.condition) };
                 const stmts: []const *ast.Stmt =
@@ -99,6 +118,14 @@ pub const Printer = struct {
             },
             .block_statement => |block_statement| {
                 try self.parenthesizeStmt(writer, "block", .{}, block_statement.list);
+            },
+            .class_statement => |class_statement| {
+                try self.parenthesizeStmt(
+                    writer,
+                    "class {s}",
+                    .{class_statement.name.lexeme},
+                    class_statement.methods,
+                );
             },
         }
     }
