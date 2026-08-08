@@ -37,36 +37,45 @@ pub const Node = struct {
     const Tag = enum {
         // Expressions //
 
+        /// token: Operator Token
         /// lhs: left Expr
         /// rhs: right Expr
         binary,
-        /// lhs: arg start index
-        /// rhs: arg end index
+        /// token: Paren
+        /// lhs: callee Expr
+        /// rhs: Extra Args Expr: [len, args...]
         call,
+        /// token: Name Token
         /// lhs: Object Expr
         /// rhs: 0
         get,
         /// lhs: Expression Expr
         /// rhs: 0
         group,
+        /// token: Operator Token
         /// lhs: right Expr
         /// rhs: 0
         unary,
-        /// lhs: Object index
+        /// lhs: Value index
         /// rhs: 0
         literal,
+        /// token: Operator Token
         /// lhs: left Expr
         /// rhs: right Expr
         logical,
+        /// token: Name Token
         /// lhs: Object Expr
         /// rhs: Value Expr
         set,
+        /// token: Name Token
         /// lhs: 0
         /// rhs: 0
         variable,
+        /// token: Name Token
         /// lhs: Value Expr
         /// rhs: 0
         assign,
+        /// token: Name Token
         /// lhs: 0
         /// rhs: 0
         this,
@@ -76,7 +85,8 @@ pub const Node = struct {
         /// lhs: Expression Expr
         /// rhs: 0
         expr,
-        /// lhs: Extra Token: [offset, len]
+        /// token: Name Token
+        /// lhs: Extra: Params Token: [len, params...]
         /// rhs: Block Stmt
         fun,
         /// lhs: condition Expr
@@ -85,9 +95,11 @@ pub const Node = struct {
         /// lhs: Expression Expr
         /// rhs: 0
         print,
+        /// token: Keyword Token
         /// lhs: 0 orelse Value Expr
         /// rhs: 0
         @"return",
+        /// token: Name Token
         /// lhs: 0 orelse Initializer Expr
         /// rhs: 0
         @"var",
@@ -97,6 +109,7 @@ pub const Node = struct {
         /// lhs: List start index
         /// rhs: List end index
         block,
+        /// token: Name Token
         /// lhs: Methods start index
         /// rhs: Methods end index
         class,
