@@ -152,7 +152,7 @@ const LexerError =
     Allocator.Error ||
     Io.Writer.Error;
 
-pub fn scan(gpa: Allocator, ctx: *Context, source: [:0]const u8) LexerError![]Token {
+pub fn scan(gpa: Allocator, ctx: *Context, source: [:0]const u8) LexerError!TokenList.Slice {
     var lexer: Lexer = .init(source);
     return try lexer.scan(gpa, ctx);
 }
@@ -176,8 +176,8 @@ pub const Lexer = struct {
         };
     }
 
-    pub fn scan(self: *Lexer, gpa: Allocator, ctx: *Context) LexerError![]Token {
-        var list: ArrayList(Token) = .empty;
+    pub fn scan(self: *Lexer, gpa: Allocator, ctx: *Context) LexerError!TokenList.Slice {
+        var list: TokenList = .empty;
         defer list.deinit(gpa);
 
         // Consume data until EOF.
@@ -189,7 +189,7 @@ pub const Lexer = struct {
             try list.append(gpa, token);
             if (token.tag == .eof) break;
         }
-        return try list.toOwnedSlice(gpa);
+        return list.toOwnedSlice();
     }
 
     const State = enum {
@@ -444,6 +444,7 @@ pub fn getMessage(err: LexerError) ![]const u8 {
     };
 }
 
+// TODO: Need to separate from tokenizer.
 pub fn report(ctx: *Context, source: [:0]const u8, index: usize, message: []const u8) !void {
     const line = Line.get(source, index);
     const position = line.loc.end - line.loc.start;
