@@ -18,6 +18,22 @@ pub const Ast = struct {
         gpa.free(self.symbols);
         gpa.free(self.extra);
     }
+
+    pub fn getExtra(self: Ast, index: u32) u32 {
+        return self.extra[@intCast(index)];
+    }
+
+    pub fn getNode(self: Ast, index: u32) Node {
+        return self.nodes.get(@intCast(index));
+    }
+
+    pub fn getToken(self: Ast, index: u32) Token {
+        return self.tokens.get(@intCast(index));
+    }
+
+    pub fn sliceExtra(self: Ast, start: u32, end: u32) []const u32 {
+        return self.extra[@intCast(start)..@intCast(end)];
+    }
 };
 
 const Index = u32;
@@ -156,7 +172,7 @@ pub fn Store(comptime T: type) type {
         /// It iterates forward.
         pub fn setForward(self: *Store(T), key: u32, value: T) error{NotFoundEntry}!void {
             if (self.lookUpForward(key)) |index| {
-                self.entries.items(.value)[@intCast(index)] = value;
+                self.entries.items(.value)[index] = value;
             } else {
                 return error.NotFoundEntry;
             }
@@ -166,7 +182,7 @@ pub fn Store(comptime T: type) type {
         /// It iterates backward.
         pub fn setBackward(self: *Store(T), key: u32, value: T) error{NotFoundEntry}!void {
             if (self.lookUpBackward(key)) |index| {
-                self.entries.items(.value)[@intCast(index)] = value;
+                self.entries.items(.value)[index] = value;
             } else {
                 return error.NotFoundEntry;
             }
@@ -175,34 +191,34 @@ pub fn Store(comptime T: type) type {
         /// Get the target key's value by iterating forward.
         pub fn getForward(self: Store(T), key: u32) ?T {
             const index = self.lookUpForward(key) orelse return null;
-            const entry = self.entries.get(@intCast(index));
+            const entry = self.entries.get(index);
             return entry.value;
         }
 
         /// Get the target key's value by iterating backward
         pub fn getBackward(self: Store(T), key: u32) ?T {
             const index = self.lookUpBackward(key) orelse return null;
-            const entry = self.entries.get(@intCast(index));
+            const entry = self.entries.get(index);
             return entry.value;
         }
 
         /// look up the target position index by iterating forward.
-        pub fn lookUpForward(self: Store(T), key: u32) ?u32 {
+        pub fn lookUpForward(self: Store(T), key: u32) ?usize {
             const keys: []const u32 = self.entries.items(.key);
             for (keys, 0..) |store_key, index| {
-                if (store_key == key) return @intCast(index);
+                if (store_key == key) return index;
             }
             return null;
         }
 
         /// look up the target position index by iterating backward.
-        pub fn lookUpBackward(self: Store(T), key: u32) ?u32 {
+        pub fn lookUpBackward(self: Store(T), key: u32) ?usize {
             const keys: []const u32 = self.entries.items(.key);
 
             var index: usize = self.entries.len;
             while (index > 0) {
                 index -= 1;
-                if (keys[index] == key) return @intCast(index);
+                if (keys[index] == key) return index;
             }
             return null;
         }
