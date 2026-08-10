@@ -481,6 +481,7 @@ pub fn report(ctx: *Context, source: [:0]const u8, index: usize, message: []cons
         \\{}:{} Error: {s}
         \\{s}
         \\{s:>[5]}
+        \\
     , .{ line.pos, position, message, lexeme, "^", position });
 }
 
@@ -610,6 +611,7 @@ test "fails scanner" {
         \\1:10 Error: Unterminated String.
         \\ "a string
         \\         ^
+        \\
         ,
     );
     try testFailLexer(
@@ -620,6 +622,7 @@ test "fails scanner" {
         \\2:16 Error: Unterminated Block Comment.
         \\ without the end
         \\               ^
+        \\
         ,
     );
 }
