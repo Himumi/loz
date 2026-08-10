@@ -32,7 +32,21 @@ pub const Node = struct {
     const Data = struct {
         lhs: Index,
         rhs: Index,
+
+        pub const empty: Data = .{ .lhs = 0, .rhs = 0 };
+
+        pub fn init(lhs: u32, rhs: u32) Data {
+            return .{ .lhs = lhs, .rhs = rhs };
+        }
     };
+
+    pub fn init(tag: Tag, token: Token.Index, data: Data) Node {
+        return .{
+            .tag = tag,
+            .token = token,
+            .data = data,
+        };
+    }
 
     const Tag = enum {
         // Expressions //
