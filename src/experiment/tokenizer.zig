@@ -153,14 +153,19 @@ const LexerError =
     Io.Writer.Error;
 
 pub fn scan(gpa: Allocator, ctx: *Context, source: [:0]const u8) LexerError!TokenList.Slice {
-    var lexer: Lexer = .init(source);
-    return try lexer.scan(gpa, ctx);
+    var lexer: Lexer = .empty;
+    try lexer.scan(gpa, ctx, source);
+    return lexer.toOwnSlice();
 }
 
 pub const Lexer = struct {
-    // It does not own the memory.
+    index: usize = 0,
+
+    // It borrowed the memory
     source: [:0]const u8,
-    index: usize,
+
+    // The result
+    tokens: TokenList = .empty,
 
     pub const Error = error{
         UnexpectedCharacter,
@@ -169,27 +174,49 @@ pub const Lexer = struct {
         UnterminatedBlockComment,
     };
 
-    pub fn init(source: [:0]const u8) Lexer {
-        return .{
-            .source = source,
-            .index = 0,
-        };
+    pub const empty: Lexer = .{
+        .source = undefined,
+        .index = 0,
+        .tokens = .empty,
+    };
+
+    pub fn deinit(self: *Lexer, gpa: Allocator) void {
+        self.tokens.deinit(gpa);
     }
 
-    pub fn scan(self: *Lexer, gpa: Allocator, ctx: *Context) LexerError!TokenList.Slice {
-        var list: TokenList = .empty;
-        defer list.deinit(gpa);
+    /// Tokenize the input source.
+    /// It does not reset the index tracker.
+    ///
+    /// NOTE: The caller has to Append new data to the previous
+    /// to keep tokenize follows the previous index tracker.
+    pub fn scan(
+        self: *Lexer,
+        gpa: Allocator,
+        ctx: *Context,
+        source: [:0]const u8,
+    ) LexerError!void {
+        self.source = source;
 
         // Consume data until EOF.
         while (true) {
             const token = self.next() catch |err| {
+                // TODO: Need to separate it from tokenizer.
                 try report(ctx, self.source, self.index, try getMessage(err));
                 return err;
             };
-            try list.append(gpa, token);
+            try self.tokens.append(gpa, token);
             if (token.tag == .eof) break;
         }
-        return list.toOwnedSlice();
+    }
+
+    /// The caller borrows the memory.
+    pub fn slice(self: Lexer) TokenList.Slice {
+        return self.tokens.slice();
+    }
+
+    /// The caller owns the memory. Resets the struct's state.
+    pub fn toOwnSlice(self: *Lexer) TokenList.Slice {
+        return self.tokens.toOwnedSlice();
     }
 
     const State = enum {
@@ -604,16 +631,16 @@ fn testLexer(source: [:0]const u8, expected_len: usize, expected: []const u8) !v
     defer stream.deinit();
 
     var writer = &stream.writer;
+    var ctx: Context = .init(undefined, .{ .err = writer });
 
-    var lexer: Lexer = .init(source);
+    var tokens = try scan(gpa, &ctx, source);
+    defer tokens.deinit(gpa);
 
-    var tokens_len: usize = 0;
-    while (true) {
-        const token = try lexer.next();
-        if (tokens_len > 0) {
+    for (0..tokens.len) |index| {
+        const token = tokens.get(index);
+        if (index > 0) {
             try writer.writeByte(' ');
         }
-        tokens_len += 1;
 
         if (token.tag == .eof) {
             try writer.print("{s}", .{token.tag.symbol()});
@@ -621,7 +648,8 @@ fn testLexer(source: [:0]const u8, expected_len: usize, expected: []const u8) !v
         }
         try writer.print("{s}", .{token.lexeme(source)});
     }
-    try testing.expectEqual(expected_len, tokens_len);
+
+    try testing.expectEqual(expected_len, tokens.len);
     try testing.expectEqualSlices(u8, expected, writer.buffered());
 }
 
