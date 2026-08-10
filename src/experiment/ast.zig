@@ -6,8 +6,11 @@ pub const Ast = struct {
     tokens: TokenList.Slice,
     literals: []const Value,
 
-    symbols: []const u32,
     extra: []const u32,
+
+    // It does not owns the memory.
+    resolved: Resolver.Result,
+    symbols: []const u32,
 
     pub fn deinit(self: *Ast, gpa: Allocator) void {
         gpa.free(self.roots);
@@ -15,7 +18,6 @@ pub const Ast = struct {
         self.tokens.deinit(gpa);
         gpa.free(self.literals);
 
-        gpa.free(self.symbols);
         gpa.free(self.extra);
     }
 
@@ -462,3 +464,4 @@ const Env = @import("EnvSoa.zig");
 const tokenizer = @import("tokenizer.zig");
 const Token = tokenizer.Token;
 const TokenList = tokenizer.TokenList;
+const Resolver = @import("resolver.zig").Resolver;
