@@ -29,6 +29,11 @@ pub const Ast = struct {
         return self.nodes.get(@intCast(index));
     }
 
+    pub fn getLiteral(self: Ast, index: u32) Value {
+        return self.literals[@intCast(index)];
+    }
+
+
     pub fn getToken(self: Ast, index: u32) Token {
         return self.tokens.get(@intCast(index));
     }
