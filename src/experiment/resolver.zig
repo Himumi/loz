@@ -1,0 +1,424 @@
+pub fn resolve(gpa: Allocator, ctx: *Ctx, tree: ast.Ast) Resolver.Error!Resolver.Result {
+    var resolver: Resolver = .init(gpa, ctx);
+    defer resolver.deinit();
+    // Transfer the result to the caller.
+    return try resolver.resolve(tree);
+}
+
+pub const Resolver = struct {
+    allocator: Allocator,
+    ctx: *Ctx,
+
+    // It borrowed the memory.
+    tree: ast.Ast,
+    resolved: Result,
+
+    // It only owns the container memory.
+    scopes: ArrayList(StringHashMap(bool)),
+
+    fun_kind: FunKind = .none,
+    class_kind: ClassKind = .none,
+
+    const FunKind = enum { none, function, initializer, method };
+    const ClassKind = enum { none, class };
+
+    /// NOTE: Store Node index (u32) as key and distance (usize) as value
+    /// TODO: Need to implement binary search, it is sorted by default.
+    pub const Result = ast.Store(usize);
+    pub const Error = Allocator.Error || Io.Writer.Error;
+
+    pub fn init(gpa: Allocator, ctx: *Ctx) Resolver {
+        return .{
+            .allocator = gpa,
+            .ctx = ctx,
+            .scopes = .empty,
+            .resolved = undefined,
+            .tree = undefined,
+        };
+    }
+
+    pub fn deinit(self: *Resolver) void {
+        for (self.scopes.items) |*scope| {
+            scope.deinit();
+        }
+        self.scopes.deinit(self.allocator);
+    }
+
+    pub fn resolve(self: *Resolver, tree: ast.Ast) Error!Result {
+        self.tree = tree;
+        self.resolved = .empty;
+        errdefer self.resolved.deinit(self.allocator);
+
+        for (self.tree.roots) |root| {
+            try self.resolveNode(root);
+        }
+
+        // Transfer the locals to the caller.
+        return self.resolved;
+    }
+
+    fn resolveNode(self: *Resolver, node_index: u32) Error!void {
+        const node = self.tree.nodes.get(@intCast(node_index));
+        switch (node.tag) {
+            .binary => {
+                try self.resolveNode(node.data.lhs);
+                try self.resolveNode(node.data.rhs);
+            },
+            .call => {
+                try self.resolveNode(node.data.lhs);
+
+                const len = self.tree.getExtra(node.data.rhs);
+                const offset = self.tree.getExtra(node.data.rhs + 1);
+
+                for (offset..offset + len) |arg_index| {
+                    const arg = self.tree.getExtra(@intCast(arg_index));
+                    try self.resolveNode(arg);
+                }
+            },
+            .get => {
+                try self.resolveNode(node.data.lhs);
+            },
+            .group => {
+                try self.resolveNode(node.data.lhs);
+            },
+            .unary => {
+                try self.resolveNode(node.data.lhs);
+            },
+            .literal => {},
+            .logical => {
+                try self.resolveNode(node.data.lhs);
+                try self.resolveNode(node.data.rhs);
+            },
+            .set => {
+                try self.resolveNode(node.data.lhs);
+                try self.resolveNode(node.data.rhs);
+            },
+            .variable => {
+                if (self.scopes.items.len == 0) return;
+                const scope = self.scopes.getLast();
+
+                const token = self.tree.getToken(node.token);
+                if (scope.get(token.lexeme(self.tree.source))) |value| {
+                    if (value == false) {
+                        try self.report(token, "Can't read local variable in its own initializer.");
+                    }
+                }
+
+                try self.resolveLocal(node_index, token);
+                return;
+            },
+            .assign => {
+                try self.resolveNode(node.data.lhs);
+                const token = self.tree.getToken(node.token);
+                try self.resolveLocal(node_index, token);
+            },
+            .this => {
+                const token = self.tree.getToken(node.token);
+                if (self.class_kind == .none) {
+                    try self.report(token, "Can't use 'this' outsize of a class.");
+                }
+                try self.resolveLocal(node_index, token);
+            },
+
+            // // Statements //
+
+            .expr => {
+                try self.resolveNode(node.data.lhs);
+            },
+            .fun => {
+                const name = self.tree.getToken(node.token);
+                try self.declare(name);
+                try self.define(name);
+                try self.resolveFun(node, .function);
+            },
+            .@"if" => {
+                try self.resolveNode(node.data.lhs);
+
+                const offset = node.data.rhs + 1;
+                const len = self.tree.getExtra(node.data.rhs);
+
+                try self.resolveNode(offset); // then_node
+                if (len > 1) {
+                    try self.resolveNode(offset + 2); // else_node
+                }
+            },
+            .print => {
+                try self.resolveNode(node.data.lhs);
+            },
+            .@"return" => {
+                const keyword = self.tree.getToken(node.token);
+                if (self.fun_kind == .none) {
+                    try self.report(keyword, "Can't return from top-level code.");
+                }
+                if (node.data.lhs > 0) {
+                    if (self.fun_kind == .initializer) {
+                        try self.report(keyword, "Can't return a value from an initializer.");
+                    }
+                    try self.resolveNode(node.data.lhs);
+                }
+            },
+            .@"var" => {
+                const name = self.tree.getToken(node.token);
+                try self.declare(name);
+                if (node.data.lhs > 0) {
+                    try self.resolveNode(node.data.lhs);
+                }
+                try self.define(name);
+            },
+            .@"while" => {
+                try self.resolveNode(node.data.lhs);
+                try self.resolveNode(node.data.rhs);
+            },
+            .block => {
+                try self.begin();
+                defer self.end();
+
+                for (self.tree.sliceExtra(node.data.lhs, node.data.rhs)) |index| {
+                    try self.resolveNode(index);
+                }
+            },
+            .class => {
+                const enclosing = self.class_kind;
+                defer self.class_kind = enclosing;
+
+                self.class_kind = .class;
+
+                const name = self.tree.getToken(node.token);
+
+                try self.declare(name);
+                try self.define(name);
+
+                try self.begin();
+                defer self.end();
+
+                try self.scopes.items[self.scopes.items.len - 1].put("this", true);
+
+                const offset = self.tree.getExtra(node.data.lhs);
+                const offset_end = self.tree.getExtra(node.data.rhs);
+
+                for (self.tree.sliceExtra(offset, offset_end)) |method_index| {
+                    const method = self.tree.getNode(method_index);
+                    const token = self.tree.getToken(method.token);
+
+                    const is_init = mem.eql(u8, token.lexeme(self.tree.source), "init");
+                    const declaration: FunKind = if (is_init) .initializer else .method;
+
+                    try self.resolveFun(method, declaration);
+                }
+            },
+        }
+    }
+
+    fn resolveFun(self: *Resolver, fun_node: ast.Node, fun_type: FunKind) Error!void {
+        const enclosing = self.fun_kind;
+        defer self.fun_kind = enclosing;
+
+        try self.begin();
+        defer self.end();
+
+        self.fun_kind = fun_type;
+
+        const offset = fun_node.data.rhs + 1;
+        const len = self.tree.getExtra(fun_node.data.rhs);
+
+        for (self.tree.sliceExtra(offset, offset + len)) |param_index| {
+            const param = self.tree.getToken(param_index);
+            try self.declare(param);
+            try self.define(param);
+        }
+
+        try self.resolveNode(fun_node.data.rhs);
+    }
+
+    fn resolveLocal(self: *Resolver, node_index: u32, name: Token) !void {
+        if (self.scopes.items.len == 0) return;
+        const last = self.scopes.items.len - 1;
+
+        const lexeme = name.lexeme(self.tree.source);
+
+        var it: ReverseIterator(StringHashMap(bool)) = .init(self.scopes.items);
+        while (it.next()) |entry| {
+            if (entry.value_ptr.contains(lexeme)) {
+                const value = last - entry.index;
+                self.resolved.setBackward(node_index, value) catch {
+                    try self.resolved.append(self.allocator, node_index, value);
+                };
+            }
+        }
+    }
+
+    fn begin(self: *Resolver) Allocator.Error!void {
+        try self.scopes.append(self.allocator, .init(self.allocator));
+    }
+
+    fn end(self: *Resolver) void {
+        var scope = self.scopes.pop() orelse unreachable;
+        scope.deinit();
+    }
+
+    fn declare(self: *Resolver, value: Token) !void {
+        if (self.scopes.items.len == 0) return;
+
+        const lexeme = value.lexeme(self.tree.source);
+
+        var scope = &self.scopes.items[self.scopes.items.len - 1];
+        if (scope.contains(lexeme)) {
+            return try self.report(value, "Already a variable with this name in this scope.");
+        }
+        try scope.put(lexeme, false);
+    }
+
+    fn define(self: *Resolver, value: Token) !void {
+        if (self.scopes.items.len == 0) return;
+
+        var scope = &self.scopes.items[self.scopes.items.len - 1];
+        try scope.put(value.lexeme(self.tree.source), true);
+    }
+
+    fn report(self: Resolver, value: Token, message: []const u8) !void {
+        try tokenizer.report(self.ctx, self.tree.source, value.loc.start + 1, message);
+    }
+};
+
+fn ReverseIterator(comptime T: type) type {
+    const Entry = struct {
+        index: usize,
+        value_ptr: *T,
+    };
+
+    return struct {
+        slice: []const T,
+        index: usize,
+
+        pub fn init(slice: []const T) ReverseIterator(T) {
+            return .{
+                .slice = slice,
+                .index = slice.len,
+            };
+        }
+
+        pub fn next(self: *ReverseIterator(T)) ?Entry {
+            if (self.index == 0) return null;
+
+            self.index -= 1;
+            return .{
+                .index = self.index,
+                .value_ptr = @constCast(&self.slice[self.index]),
+            };
+        }
+    };
+}
+
+test "resolver" {
+    try testResolver(
+        \\ var a = "hello";
+        \\ { print a; }
+    , &.{});
+
+    try testResolver(
+        \\ {
+        \\   var a;
+        \\   {
+        \\     a = "hello";
+        \\   }
+        \\ }
+    , &.{
+        .{ 6, 1 },
+    });
+
+    try testResolver(
+        \\ var a = "global";
+        \\ {
+        \\    fun showA() {
+        \\      print a;
+        \\    }
+        \\
+        \\    showA();
+        \\    var a = "block";
+        \\    showA();
+        \\ }
+    , &.{
+        .{ 6, 1 },
+        .{ 8, 0 },
+        .{ 13, 0 },
+    });
+}
+
+test "fails resolver" {
+    try testFailResolver(
+        \\ {
+        \\   var a = "hello";
+        \\   var a = "world";
+        \\ }
+    ,
+        \\3:8 Error: Already a variable with this name in this scope.
+        \\   var a = "world";
+        \\       ^
+        \\
+    );
+
+    try testFailResolver(
+        \\ return "at top level";
+    ,
+        \\1:2 Error: Can't return from top-level code.
+        \\ return "at top level";
+        \\ ^
+        \\
+    );
+}
+
+fn testResolver(source: [:0]const u8, expected_list: []const struct { u32, usize }) !void {
+    const gpa = testing.allocator;
+
+    var stream_buffer: [256]u8 = undefined;
+    var stream: Io.Writer = .fixed(&stream_buffer);
+
+    var ctx: Ctx = .init(undefined, .{ .err = &stream, .out = &stream });
+
+    var tree = try parser.parse(gpa, &ctx, source);
+    defer tree.deinit(gpa);
+
+    var resolved = try resolve(gpa, &ctx, tree);
+    defer resolved.deinit(gpa);
+
+    for (expected_list) |expected| {
+        const key_index = resolved.lookUpForward(expected[0]) orelse {
+            return error.NotFoundLocal;
+        };
+
+        const entry_value: usize = resolved.entries.items(.value)[key_index];
+        try testing.expectEqual(expected[1], entry_value);
+    }
+}
+
+fn testFailResolver(source: [:0]const u8, error_message: []const u8) !void {
+    const gpa = testing.allocator;
+
+    var stream_buffer: [256]u8 = undefined;
+    var stream: Io.Writer = .fixed(&stream_buffer);
+
+    var ctx: Ctx = .init(undefined, .{ .err = &stream, .out = &stream });
+
+    var tree = try parser.parse(gpa, &ctx, source);
+    defer tree.deinit(gpa);
+
+    var resolved = try resolve(gpa, &ctx, tree);
+    defer resolved.deinit(gpa);
+
+    try testing.expectEqualSlices(u8, error_message, stream.buffered());
+}
+
+const std = @import("std");
+const mem = std.mem;
+const testing = std.testing;
+const AutoHashMap = std.AutoHashMap;
+const Allocator = mem.Allocator;
+const ArrayList = std.ArrayList;
+const Io = std.Io;
+const StringHashMap = std.StringHashMap;
+
+const parser = @import("parser.zig");
+const ast = @import("ast.zig");
+const Ctx = @import("Context.zig");
+const tokenizer = @import("tokenizer.zig");
+const Token = tokenizer.Token;
