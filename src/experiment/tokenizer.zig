@@ -474,7 +474,7 @@ pub fn getMessage(err: LexerError) ![]const u8 {
 // TODO: Need to separate from tokenizer.
 pub fn report(ctx: *Context, source: [:0]const u8, index: usize, message: []const u8) !void {
     const line = Line.get(source, index);
-    const position = line.loc.end - line.loc.start;
+    const position = index - line.loc.start;
     const lexeme = source[line.loc.start..line.loc.end];
 
     try ctx.report(
