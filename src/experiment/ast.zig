@@ -484,7 +484,7 @@ pub const Class = struct {
     methods: Index,
 };
 
-const Instance = struct {
+pub const Instance = struct {
     stmt: Index,
     /// It Points to interpreter's instances_fields.
     fields: Index,
