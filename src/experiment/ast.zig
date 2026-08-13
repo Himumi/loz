@@ -33,6 +33,10 @@ pub const Ast = struct {
         return self.literals[@intCast(index)];
     }
 
+    pub fn getSymbol(self: Ast, index: u32) u32 {
+        return self.symbols[@intCast(index)];
+    }
+
     pub fn getToken(self: Ast, index: u32) Token {
         return self.tokens.get(@intCast(index));
     }
