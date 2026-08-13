@@ -426,6 +426,47 @@ pub const Object = union(enum) {
             .nil => .nil,
         };
     }
+
+    pub fn isString(self: Object) bool {
+        return self == .string;
+    }
+
+    pub fn isNumber(self: Object) bool {
+        return self == .number;
+    }
+
+    pub fn isBoolean(self: Object) bool {
+        return self == .boolean;
+    }
+
+    pub fn isNil(self: Object) bool {
+        return self == .nil;
+    }
+
+    pub fn isFun(self: Object) bool {
+        return self == .fun;
+    }
+
+    pub fn isClass(self: Object) bool {
+        return self == .class;
+    }
+
+    pub fn isInstance(self: Object) bool {
+        return self == .instance;
+    }
+
+    pub fn isSame(self: Object, target: Object) bool {
+        if (self.isString() and target.isString()) return true;
+        if (self.isNumber() and target.isNumber()) return true;
+        if (self.isBoolean() and target.isBoolean()) return true;
+        if (self.isNil() and target.isNil()) return true;
+
+        if (self.isFun() and target.isFun()) return true;
+        if (self.isClass() and target.isClass()) return true;
+        if (self.isInstance() and target.isInstance()) return true;
+
+        return false;
+    }
 };
 
 const Fun = struct {
