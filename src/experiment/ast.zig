@@ -33,7 +33,6 @@ pub const Ast = struct {
         return self.literals[@intCast(index)];
     }
 
-
     pub fn getToken(self: Ast, index: u32) Token {
         return self.tokens.get(@intCast(index));
     }
@@ -326,6 +325,7 @@ test "StringPool" {
 pub const String = union(enum) {
     literal: Token.Index,
     concat: Concat,
+    number: [8]u8,
 
     const Concat = struct {
         // It points to Interpreter's Strings pool.
@@ -343,7 +343,19 @@ pub const String = union(enum) {
             .concat => |concat| {
                 try writer.print("<string concat {} {}>", .{ concat.left, concat.right });
             },
+            .number => |number| {
+                const real_number: f64 = @bitCast(number);
+                try writer.print("<string number {}>", .{real_number});
+            },
         }
+    }
+
+    pub fn fromNumber(number: f64) String {
+        return .{ .number = @bitCast(number) };
+    }
+
+    pub fn getNumber(self: String) f64 {
+        return @bitCast(self.number);
     }
 
     pub fn isLiteral(self: String) bool {
@@ -466,7 +478,7 @@ const MultiArrayList = std.MultiArrayList;
 const StringHashMap = std.StringHashMap;
 
 const Env = @import("EnvSoa.zig");
+const Resolver = @import("resolver.zig").Resolver;
 const tokenizer = @import("tokenizer.zig");
 const Token = tokenizer.Token;
 const TokenList = tokenizer.TokenList;
-const Resolver = @import("resolver.zig").Resolver;
