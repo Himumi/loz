@@ -3,44 +3,48 @@ pub const SymbolList = []const Symbol;
 
 pub fn resolve(gpa: Allocator, source: [:0]const u8, tokens: TokenList.Slice) !SymbolList {
     var interner: Interner = try .initCapacity(gpa, tokens.len);
-    defer interner.deinit(gpa);
+    defer interner.deinit();
 
-    return try interner.resolve(gpa, source, tokens);
+    return try interner.resolve(source, tokens);
 }
 
 pub const Interner = struct {
+    allocator: Allocator,
     /// It keeps the mapping tokens.
-    recorder: std.array_hash_map.String(Symbol) = .empty,
+    recorder: std.StringHashMap(Symbol),
     /// It stores the tokens same length size.
     /// It empties every iteration.
     result: ArrayList(Symbol) = .empty,
     /// It keeps the counter symbol.
-    counter: u32 = 0,
+    counter: u32 = @intCast(Token.keywords.values().len),
 
-    pub const empty: Interner = .{
-        .recorder = .empty,
-        .result = .empty,
-        .counter = 0,
-    };
-
-    pub fn initCapacity(gpa: Allocator, len: usize) Allocator.Error!Interner {
+    pub fn init(gpa: Allocator) Interner {
         return .{
-            .recorder = .empty,
-            .result = try .initCapacity(gpa, len),
-            .counter = 0,
+            .allocator = gpa,
+            .recorder = .init(gpa),
+            .result = .empty,
+            .counter = @intCast(Token.keywords.values().len),
         };
     }
 
-    pub fn deinit(self: *Interner, gpa: Allocator) void {
-        self.recorder.deinit(gpa);
-        self.result.deinit(gpa);
+    pub fn initCapacity(gpa: Allocator, len: usize) Allocator.Error!Interner {
+        return .{
+            .allocator = gpa,
+            .recorder = .init(gpa),
+            .result = try .initCapacity(gpa, len),
+            .counter = @intCast(Token.keywords.values().len),
+        };
+    }
+
+    pub fn deinit(self: *Interner) void {
+        self.recorder.deinit();
+        self.result.deinit(self.allocator);
     }
 
     /// Maps the same lexemes to a symbol.
     /// It has a same length with input tokens.
     pub fn resolve(
         self: *Interner,
-        gpa: Allocator,
         source: [:0]const u8,
         tokens: TokenList.Slice,
     ) Allocator.Error!SymbolList {
@@ -48,16 +52,18 @@ pub const Interner = struct {
             const token = tokens.get(index);
             const lexeme = token.lexeme(source);
 
-            if (self.recorder.get(lexeme)) |symbol| {
-                try self.result.append(gpa, symbol);
+            if (Token.keywords.get(lexeme)) |symbol| {
+                try self.result.append(self.allocator, @intFromEnum(symbol));
+            } else if (self.recorder.get(lexeme)) |symbol| {
+                try self.result.append(self.allocator, symbol);
             } else {
-                try self.recorder.put(gpa, lexeme, self.counter);
-                try self.result.append(gpa, self.counter);
+                try self.recorder.put(lexeme, self.counter);
+                try self.result.append(self.allocator, self.counter);
                 self.counter += 1;
             }
         }
 
-        return self.result.toOwnedSlice(gpa);
+        return self.result.toOwnedSlice(self.allocator);
     }
 };
 
@@ -68,13 +74,13 @@ test "interner" {
     var tokens = try tokenizer.scan(gpa, undefined, source);
     defer tokens.deinit(gpa);
 
-    var interner: Interner = .empty;
-    defer interner.deinit(gpa);
+    var interner: Interner = .init(gpa);
+    defer interner.deinit();
 
-    const symbols = try interner.resolve(gpa, source, tokens);
+    const symbols = try interner.resolve(source, tokens);
     defer gpa.free(symbols);
 
-    try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3, 4, 5, 1, 4, 6 }, symbols);
+    try testing.expectEqualSlices(u32, &.{ 14, 16, 17, 18, 19, 9, 16, 19, 20 }, symbols);
 }
 
 const std = @import("std");
@@ -84,4 +90,5 @@ const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
 
 const tokenizer = @import("tokenizer.zig");
+const Token = tokenizer.Token;
 const TokenList = tokenizer.TokenList;
