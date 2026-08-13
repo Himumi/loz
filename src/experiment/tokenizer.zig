@@ -16,7 +16,25 @@ pub const Token = struct {
         return source[start..end];
     }
 
-    pub const Tag = enum {
+    pub const Tag = enum(u32) {
+        // Keywords
+        keyword_and = 0,
+        keyword_class,
+        keyword_else,
+        keyword_false,
+        keyword_fun,
+        keyword_for,
+        keyword_if,
+        keyword_nil,
+        keyword_or,
+        keyword_print,
+        keyword_return,
+        keyword_super,
+        keyword_this,
+        keyword_true,
+        keyword_var,
+        keyword_while,
+
         // Single Character Tokens
         left_paren,
         right_paren,
@@ -44,24 +62,6 @@ pub const Token = struct {
         identifier,
         string,
         number,
-
-        // Keywords
-        keyword_and,
-        keyword_class,
-        keyword_else,
-        keyword_false,
-        keyword_fun,
-        keyword_for,
-        keyword_if,
-        keyword_nil,
-        keyword_or,
-        keyword_print,
-        keyword_return,
-        keyword_super,
-        keyword_this,
-        keyword_true,
-        keyword_var,
-        keyword_while,
 
         // End-Of-File
         eof,
