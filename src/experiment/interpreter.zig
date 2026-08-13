@@ -1,5 +1,5 @@
 pub fn render(gpa: Allocator, ctx: *Ctx, tree: ast.Ast) RendererError!void {
-    var renderer: Renderer = .init(gpa, ctx);
+    var renderer: Renderer = try .init(gpa, ctx);
     defer renderer.deinit();
 
     return try renderer.render(tree);
