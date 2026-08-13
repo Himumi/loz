@@ -469,9 +469,10 @@ pub const Object = union(enum) {
     }
 };
 
-const Fun = struct {
+pub const Fun = struct {
     tag: enum { fun, init },
     stmt: Index,
+    arity: u8,
     closure: *Env,
 };
 
