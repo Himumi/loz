@@ -35,10 +35,10 @@ pub const Printer = struct {
                 try self.writer.print(" '{s}'", .{paren.tag.symbol()});
 
                 const offset = value.data.rhs + 1;
-                const len = self.tree.extra[value.data.rhs];
+                const len = self.tree.getExtra(value.data.rhs);
                 if (len > 0) {
                     try self.writer.writeByte(' ');
-                    const args = self.tree.extra[offset .. offset + len]; // Args Exprs
+                    const args = self.tree.sliceExtra(offset, offset + len);
                     try self.parenthesize(indent, "args", .{}, args);
                 }
                 try self.writer.writeByte(')');
@@ -105,14 +105,12 @@ pub const Printer = struct {
                 const name = self.tree.tokens.get(value.token);
                 try self.writer.print("(fun {s}", .{name.lexeme(self.tree.source)});
 
-                const len = self.tree.extra[value.data.lhs];
+                const len = self.tree.getExtra(value.data.lhs);
                 if (len > 0) {
                     const offset = value.data.lhs + 1;
-                    for (offset..offset + len) |index| {
-                        if (index > @as(usize, offset)) {
-                            try self.writer.writeByte(' ');
-                        }
-                        const param = self.tree.tokens.get(index);
+                    for (self.tree.sliceExtra(offset, offset + len)) |index| {
+                        try self.writer.writeByte(' ');
+                        const param = self.tree.getToken(index);
                         try self.writer.print("{s}", .{param.lexeme(self.tree.source)});
                     }
                 }
