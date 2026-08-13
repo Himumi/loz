@@ -68,11 +68,10 @@ pub const Resolver = struct {
                 try self.resolveNode(node.data.lhs);
 
                 const len = self.tree.getExtra(node.data.rhs);
-                const offset = self.tree.getExtra(node.data.rhs + 1);
+                const offset = node.data.rhs + 1;
 
-                for (offset..offset + len) |arg_index| {
-                    const arg = self.tree.getExtra(@intCast(arg_index));
-                    try self.resolveNode(arg);
+                for (self.tree.sliceExtra(offset, offset + len)) |arg_index| {
+                    try self.resolveNode(arg_index);
                 }
             },
             .get => {
@@ -137,9 +136,9 @@ pub const Resolver = struct {
                 const offset = node.data.rhs + 1;
                 const len = self.tree.getExtra(node.data.rhs);
 
-                try self.resolveNode(offset); // then_node
+                try self.resolveNode(self.tree.getExtra(offset)); // then_node
                 if (len > 1) {
-                    try self.resolveNode(offset + 2); // else_node
+                    try self.resolveNode(self.tree.getExtra(offset + 1)); // else_node
                 }
             },
             .print => {
@@ -193,10 +192,7 @@ pub const Resolver = struct {
 
                 try self.scopes.items[self.scopes.items.len - 1].put("this", true);
 
-                const offset = self.tree.getExtra(node.data.lhs);
-                const offset_end = self.tree.getExtra(node.data.rhs);
-
-                for (self.tree.sliceExtra(offset, offset_end)) |method_index| {
+                for (self.tree.sliceExtra(node.data.lhs, node.data.rhs)) |method_index| {
                     const method = self.tree.getNode(method_index);
                     const token = self.tree.getToken(method.token);
 
@@ -218,8 +214,8 @@ pub const Resolver = struct {
 
         self.fun_kind = fun_type;
 
-        const offset = fun_node.data.rhs + 1;
-        const len = self.tree.getExtra(fun_node.data.rhs);
+        const offset = fun_node.data.lhs + 1;
+        const len = self.tree.getExtra(fun_node.data.lhs);
 
         for (self.tree.sliceExtra(offset, offset + len)) |param_index| {
             const param = self.tree.getToken(param_index);
@@ -227,7 +223,10 @@ pub const Resolver = struct {
             try self.define(param);
         }
 
-        try self.resolveNode(fun_node.data.rhs);
+        const block_node = self.tree.getNode(fun_node.data.rhs);
+        for (self.tree.sliceExtra(block_node.data.lhs, block_node.data.rhs)) |node_index| {
+            try self.resolveNode(node_index);
+        }
     }
 
     fn resolveLocal(self: *Resolver, node_index: u32, name: Token) !void {
@@ -338,7 +337,6 @@ test "resolver" {
         \\    showA();
         \\ }
     , &.{
-        .{ 6, 1 },
         .{ 8, 0 },
         .{ 13, 0 },
     });
@@ -417,8 +415,9 @@ const ArrayList = std.ArrayList;
 const Io = std.Io;
 const StringHashMap = std.StringHashMap;
 
-const parser = @import("parser.zig");
 const ast = @import("ast.zig");
+const ast_printer = @import("ast_printer.zig");
 const Ctx = @import("Context.zig");
+const parser = @import("parser.zig");
 const tokenizer = @import("tokenizer.zig");
 const Token = tokenizer.Token;
