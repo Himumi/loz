@@ -485,6 +485,20 @@ pub fn report(ctx: *Context, source: [:0]const u8, index: usize, message: []cons
     , .{ line.pos, position, message, lexeme, "^", position });
 }
 
+// TODO: Need to separate from tokenizer.
+pub fn panic(ctx: *Context, source: [:0]const u8, index: usize, message: []const u8) !void {
+    const line = Line.get(source, index);
+    const position = index - line.loc.start;
+    const lexeme = source[line.loc.start..line.loc.end];
+
+    try ctx.panic(
+        \\{}:{} Error: {s}
+        \\{s}
+        \\{s:>[5]}
+        \\
+    , .{ line.pos, position, message, lexeme, "^", position });
+}
+
 pub const Line = struct {
     pos: usize,
     loc: Loc,
