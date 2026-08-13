@@ -100,6 +100,7 @@ const Parser = struct {
             .literals = self.literals.items,
 
             .symbols = &.{},
+            .resolved = undefined,
             .extra = self.extra.items,
         };
     }
@@ -129,6 +130,7 @@ const Parser = struct {
             .literals = literals,
 
             .symbols = &.{},
+            .resolved = undefined,
             .extra = extra,
         };
     }
