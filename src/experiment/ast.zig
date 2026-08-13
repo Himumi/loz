@@ -476,9 +476,10 @@ pub const Fun = struct {
     closure: *Env,
 };
 
-const Class = struct {
+pub const Class = struct {
     stmt: Index,
-    super: ?Index,
+    /// 0 orelse Class's index.
+    super: Index,
     /// It Points to interpreter's classes_methods.
     methods: Index,
 };
