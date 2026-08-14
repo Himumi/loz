@@ -18,34 +18,68 @@ fn run(gpa: Allocator, ctx: *Context, source: [:0]const u8, is_repl: bool) !void
     }
 }
 
-// TODO: the REPL does not work with interpreter.
 pub fn runPrompt(gpa: Allocator, ctx: *Context) !void {
     var arena_allocator: ArenaAllocator = .init(gpa);
     defer arena_allocator.deinit();
 
     const arena = arena_allocator.allocator();
-    while (true) {
-        defer {
-            debug.assert(arena_allocator.reset(.retain_capacity));
-            ctx.status.had_error = false;
-        }
 
-        try ctx.stream.err.writeAll("> ");
+    var recorder: Io.Writer.Allocating = .init(gpa);
+    defer recorder.deinit();
+
+    const writer = &recorder.writer;
+
+    var lexer: Lexer = .empty;
+    defer lexer.deinit(gpa);
+
+    var analyzer: Parser = .init(gpa, ctx);
+    defer analyzer.deinit();
+
+    var renderer: Renderer = try .init(gpa, ctx);
+    defer renderer.deinit();
+
+    while (true) {
+        try ctx.stream.err.writeAll("><> ");
         try ctx.stream.err.flush();
 
-        const line = try readLine(arena, ctx.stream.in);
-        run(gpa, ctx, line, true) catch |err| {
-            if (ctx.status.had_error) continue; // Keep running REPL.
-            if (ctx.status.is_panic) process.exit(70);
-            return err;
-        };
+        const source_offset = recorder.written().len;
+        const tokens_offset = lexer.tokens.len;
+
+        try readLine(writer, ctx.stream.in);
+
+        const line = try recorder.toOwnedSliceSentinel(0);
+        defer gpa.free(line);
+
+        // Parse the new line.
+        try lexer.scan(gpa, ctx, line, source_offset);
+        try analyzer.parse(line, lexer.slice(), tokens_offset);
+
+        // Borrow the memory.
+        var tree = analyzer.slice();
+
+        // Resolve the escaped variables and symbols.
+        tree.resolved = try resolver.resolve(arena, ctx, tree);
+        tree.symbols = try interner.resolve(arena, line, tree.tokens);
+
+        const last_node = tree.roots[tree.roots.len - 1];
+
+        // Evaluate the current line.
+        const object = try renderer.execute(tree, last_node);
+        if (object != .nil) {
+            try renderer.dumpln(ctx.stream.out, object);
+        }
+
+        // Move back the memory to the recorder for the next evaluation.
+        try recorder.writer.writeAll(line);
+
+        _ = arena_allocator.reset(.retain_capacity);
+        ctx.status.had_error = false;
+
         try ctx.stream.out.flush();
     }
 }
 
-fn readLine(arena: Allocator, reader: *Io.Reader) ![:0]const u8 {
-    var recorder: Io.Writer.Allocating = .init(arena);
-
+fn readLine(writer: *Io.Writer, reader: *Io.Reader) !void {
     var i: usize = 0;
     loop: while (true) : (i += 1) {
         const line = reader.takeDelimiterInclusive('\n') catch |err|
@@ -53,7 +87,7 @@ fn readLine(arena: Allocator, reader: *Io.Reader) ![:0]const u8 {
                 error.EndOfStream => break :loop,
                 else => return err,
             };
-        try recorder.writer.writeAll(line);
+        try writer.writeAll(line);
 
         const end_semicolon = mem.endsWith(u8, line, ";\n");
         const end_block = mem.endsWith(u8, line, "}\n");
@@ -61,7 +95,6 @@ fn readLine(arena: Allocator, reader: *Io.Reader) ![:0]const u8 {
         if (i == 0 and (end_semicolon or end_block)) break;
         if (i > 0 and end_block) break;
     }
-    return try recorder.toOwnedSliceSentinel(0);
 }
 
 pub fn runFile(gpa: Allocator, ctx: *Context) !void {
@@ -105,4 +138,7 @@ const interpreter = @import("interpreter.zig");
 const parser = @import("parser.zig");
 const resolver = @import("resolver.zig");
 const tokenizer = @import("tokenizer.zig");
+const Lexer = tokenizer.Lexer;
 const Token = tokenizer.Token;
+const Parser = parser.Parser;
+const Renderer = interpreter.Renderer;
