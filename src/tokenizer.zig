@@ -154,7 +154,7 @@ const LexerError =
 
 pub fn scan(gpa: Allocator, ctx: *Context, source: [:0]const u8) LexerError!TokenList.Slice {
     var lexer: Lexer = .empty;
-    try lexer.scan(gpa, ctx, source);
+    try lexer.scan(gpa, ctx, source, 0);
     return lexer.toOwnSlice();
 }
 
@@ -194,8 +194,10 @@ pub const Lexer = struct {
         gpa: Allocator,
         ctx: *Context,
         source: [:0]const u8,
+        offset: usize,
     ) LexerError!void {
         self.source = source;
+        self.index = offset;
 
         // Consume data until EOF.
         while (true) {

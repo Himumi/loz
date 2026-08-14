@@ -5,7 +5,7 @@ pub fn parse(gpa: Allocator, ctx: *Ctx, source: [:0]const u8) !ast.Ast {
     var parser: Parser = .init(gpa, ctx);
     defer parser.deinit();
 
-    try parser.parse(source, tokens);
+    try parser.parse(source, tokens, 0);
     return try parser.toOwnSlice();
 }
 
@@ -15,7 +15,7 @@ const PaserError =
     Io.Writer.Error ||
     fmt.ParseFloatError;
 
-const Parser = struct {
+pub const Parser = struct {
     allocator: Allocator,
     ctx: *Ctx,
     index: usize = 0,
@@ -74,9 +74,11 @@ const Parser = struct {
         source: [:0]const u8,
         /// Borrow the tokens memory.
         tokens: TokenList.Slice,
+        offset: usize,
     ) PaserError!void {
         self.source = source;
         self.tokens = tokens;
+        self.index = offset;
 
         while (self.current().tag != .eof) {
             if (self.declaration()) |parent_index| {
@@ -86,11 +88,10 @@ const Parser = struct {
                 try self.sync();
             }
         }
-        self.index += 1;
     }
 
     /// The caller borrows the memory temporary.
-    fn slice(self: Parser) ast.Ast {
+    pub fn slice(self: Parser) ast.Ast {
         return .{
             .source = self.source,
 
@@ -106,7 +107,7 @@ const Parser = struct {
     }
 
     /// The caller owns the memory. Resets the struct's state.
-    fn toOwnSlice(self: *Parser) !ast.Ast {
+    pub fn toOwnSlice(self: *Parser) !ast.Ast {
         self.index = 0;
 
         const roots = try self.roots.toOwnedSlice(self.allocator);
@@ -1017,22 +1018,26 @@ test "parsing continuosly" {
     const gpa = testing.allocator;
     const source = "var number = 10;";
 
-    var tokens = try tokenizer.scan(gpa, undefined, source);
-    defer tokens.deinit(gpa);
+    var lexer: Lexer = .empty;
+    defer lexer.deinit(gpa);
+
+    try lexer.scan(gpa, undefined, source, 0);
+    var tokens = lexer.slice();
 
     var parser: Parser = .init(gpa, undefined);
     defer parser.deinit();
 
-    try parser.parse(source, tokens);
+    try parser.parse(source, tokens, 0);
     try testing.expectEqual(1, parser.roots.items.len);
 
     const new_source = source ++ " print number;";
+    const token_offset = tokens.len;
 
-    var new_tokens = try tokenizer.scan(gpa, undefined, new_source);
-    defer new_tokens.deinit(gpa);
+    try lexer.scan(gpa, undefined, new_source, source.len);
+    tokens = lexer.slice();
 
     // Continue to parsing from the current parser's index.
-    try parser.parse(new_source, new_tokens);
+    try parser.parse(new_source, tokens, token_offset);
     try testing.expectEqual(2, parser.roots.items.len);
 }
 
