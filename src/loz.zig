@@ -2,19 +2,23 @@ fn run(gpa: Allocator, ctx: *Context, source: [:0]const u8, is_repl: bool) !void
     var arena_allocator: ArenaAllocator = .init(gpa);
     defer arena_allocator.deinit();
 
+    const arena = arena_allocator.allocator();
+
     // Borrewed ast_tree to interpreter.
-    const ast_tree = try analyzer.parse(arena_allocator.allocator(), ctx, source);
-    const resolved = try resolver.resolve(arena_allocator.allocator(), ctx, ast_tree.list);
+    var tree = try parser.parse(arena, ctx, source);
+    tree.resolved = try resolver.resolve(arena, ctx, tree);
+    tree.symbols = try interner.resolve(arena, source, tree.tokens);
 
     if (ctx.status.had_error) return;
 
     if (is_repl) {
-        try interpreter.print(gpa, ctx, ast_tree, resolved);
+        try interpreter.print(gpa, ctx, tree);
     } else {
-        try interpreter.render(gpa, ctx, ast_tree, resolved);
+        try interpreter.render(gpa, ctx, tree);
     }
 }
 
+// TODO: the REPL does not work with interpreter.
 pub fn runPrompt(gpa: Allocator, ctx: *Context) !void {
     var arena_allocator: ArenaAllocator = .init(gpa);
     defer arena_allocator.deinit();
@@ -65,7 +69,7 @@ pub fn runFile(gpa: Allocator, ctx: *Context) !void {
     defer arena_allocator.deinit();
 
     const arena = arena_allocator.allocator();
-    var recorder: Io.Writer.Allocating = .init(arena);
+    var recorder: ArrayList(u8) = .empty;
 
     while (true) {
         const line = ctx.stream.in.takeDelimiterInclusive('\n') catch |err|
@@ -73,9 +77,9 @@ pub fn runFile(gpa: Allocator, ctx: *Context) !void {
                 error.EndOfStream => break,
                 else => return err,
             };
-        try recorder.writer.writeAll(line);
+        try recorder.appendSlice(arena, line);
     }
-    run(gpa, ctx, try recorder.toOwnedSliceSentinel(0), false) catch |err| {
+    run(gpa, ctx, try recorder.toOwnedSliceSentinel(arena, 0), false) catch |err| {
         if (ctx.status.had_error) process.exit(65);
         if (ctx.status.is_panic) process.exit(70);
         return err;
@@ -93,10 +97,12 @@ const ArenaAllocator = heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
 const Io = std.Io;
 
-const analyzer = @import("analyzer.zig");
+// const analyzer = @import("analyzer.zig");
 const ast_printer = @import("ast_printer.zig");
 const Context = @import("Context.zig");
+const interner = @import("interner.zig");
 const interpreter = @import("interpreter.zig");
+const parser = @import("parser.zig");
 const resolver = @import("resolver.zig");
 const tokenizer = @import("tokenizer.zig");
 const Token = tokenizer.Token;

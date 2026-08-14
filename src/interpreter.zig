@@ -5,9 +5,16 @@ pub fn render(gpa: Allocator, ctx: *Ctx, tree: ast.Ast) RendererError!void {
     return try renderer.render(tree);
 }
 
+pub fn print(gpa: Allocator, ctx: *Ctx, tree: ast.Ast) RendererError!void {
+    var renderer: Renderer = try .init(gpa, ctx);
+    defer renderer.deinit();
+
+    return try renderer.print(tree);
+}
+
 pub const RendererError = Renderer.Error || Env.Error || Io.Writer.Error || Allocator.Error;
 
-const Renderer = struct {
+pub const Renderer = struct {
     allocator: Allocator,
     ctx: *Ctx,
     tree: ast.Ast,
@@ -108,6 +115,22 @@ const Renderer = struct {
 
         for (self.tree.roots) |root| {
             _ = try self.evaluate(runtime_arena, root);
+            _ = arena_allocator.reset(.retain_capacity);
+        }
+    }
+
+    pub fn print(self: *Renderer, tree: ast.Ast) RendererError!void {
+        var arena_allocator: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena_allocator.deinit();
+
+        const runtime_arena = arena_allocator.allocator();
+        self.tree = tree;
+
+        for (self.tree.roots) |root| {
+            const object = try self.evaluate(runtime_arena, root);
+            if (object != .nil) {
+                try self.dumpln(self.ctx.stream.out, object);
+            }
             _ = arena_allocator.reset(.retain_capacity);
         }
     }
@@ -651,7 +674,7 @@ const Renderer = struct {
         }
     }
 
-    fn dumpln(self: Renderer, writer: *Io.Writer, object: ast.Object) !void {
+    pub fn dumpln(self: Renderer, writer: *Io.Writer, object: ast.Object) !void {
         try self.dump(writer, object);
         try self.ctx.stream.out.writeByte('\n');
     }
