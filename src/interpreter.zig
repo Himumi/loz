@@ -670,7 +670,7 @@ pub const Renderer = struct {
             .string => |string| try self.dumpString(writer, string),
             .class => |class_index| try self.dumpClass(writer, class_index),
             .fun => |fun_index| try self.dumpFun(writer, fun_index),
-            else => try writer.writeAll(""),
+            .instance => |instance_index| try self.dumpInstance(writer, instance_index),
         }
     }
 
@@ -691,6 +691,13 @@ pub const Renderer = struct {
         const fun_node = self.tree.getNode(fun.stmt);
         const fun_token = self.tree.getToken(fun_node.token);
         try writer.print("<fun {s}>", .{fun_token.lexeme(self.tree.source)});
+    }
+
+    fn dumpInstance(self: Renderer, writer: *Io.Writer, instance_index: u32) !void {
+        const instance = self.getInstance(instance_index);
+        const instance_node = self.tree.getNode(instance.stmt);
+        const instance_token = self.tree.getToken(instance_node.token);
+        try writer.print("<instance {s}>", .{instance_token.lexeme(self.tree.source)});
     }
 
     fn dumpString(self: Renderer, writer: *Io.Writer, string: ast.String) !void {
@@ -1024,7 +1031,7 @@ test "Renderer" {
         \\
         \\ var john = User("John");
         \\ john.greet();
-    , "nilhello, I am John\nnil");
+    , "nil<instance User>hello, I am John\nnil");
 }
 
 fn testInterpreter(
