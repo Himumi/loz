@@ -9,11 +9,12 @@ pub const Resolver = struct {
     allocator: Allocator,
     ctx: *Ctx,
 
-    // It borrowed the memory.
+    // It borrowed the memory ownership.
     tree: ast.Ast,
+    // The caller owns the memory ownership.
     resolved: Result,
 
-    // It only owns the container memory.
+    // It owns the memory ownership.
     scopes: ArrayList(StringHashMap(bool)),
 
     fun_kind: FunKind = .none,
