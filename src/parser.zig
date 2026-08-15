@@ -5,7 +5,9 @@ pub fn parse(gpa: Allocator, ctx: *Ctx, source: [:0]const u8) !ast.Ast {
     var parser: Parser = .init(gpa, ctx);
     defer parser.deinit();
 
+    // Pass the tokens ownership to the parser.
     try parser.parse(source, tokens, 0);
+    // Pass the Ast memory to the caller.
     return try parser.toOwnSlice();
 }
 
@@ -15,6 +17,7 @@ const PaserError =
     Io.Writer.Error ||
     fmt.ParseFloatError;
 
+/// The parser produces pre-order index based AST.
 pub const Parser = struct {
     allocator: Allocator,
     ctx: *Ctx,
@@ -66,14 +69,15 @@ pub const Parser = struct {
     /// Parse the tokens to AST nodes.
     /// It does not reset the index tracker.
     ///
-    /// NOTE: The caller has to Append new data to the previous
-    /// to keep parsing follows the previous index tracker.
+    /// NOTE: The caller has to append new data to the previous
+    /// to keep parsing follows the gevin offset.
     pub fn parse(
         self: *Parser,
         /// Borrow the source memory.
         source: [:0]const u8,
         /// Borrow the tokens memory.
         tokens: TokenList.Slice,
+        /// Start the parsing from offset.
         offset: usize,
     ) PaserError!void {
         self.source = source;
@@ -172,7 +176,7 @@ pub const Parser = struct {
 
         if (init_index) |index| {
             var_node.data.lhs = index;
-            self.nodes.set(@intCast(var_index), var_node);
+            self.setNode(var_index, var_node);
         }
         return var_index;
     }
@@ -191,7 +195,7 @@ pub const Parser = struct {
         const body_index = try self.statement();
 
         fun_node.data = .init(params_index, body_index);
-        self.nodes.set(@intCast(fun_index), fun_node);
+        self.setNode(fun_index, fun_node);
 
         return fun_index;
     }
@@ -249,7 +253,7 @@ pub const Parser = struct {
         }
 
         class_node.data = .init(offset, @intCast(self.extra.items.len));
-        self.nodes.set(@intCast(class_index), class_node);
+        self.setNode(class_index, class_node);
 
         return class_index;
     }
@@ -339,7 +343,7 @@ pub const Parser = struct {
         }
 
         while_node.data = .init(cond_index, body_index);
-        self.nodes.set(@intCast(while_index), while_node);
+        self.setNode(while_index, while_node);
 
         const offset: u32 = @intCast(self.extra.items.len);
         if (init_index) |index| {
@@ -348,7 +352,7 @@ pub const Parser = struct {
         try self.extra.append(self.allocator, while_index);
 
         block_node.data = .init(offset, @intCast(self.extra.items.len));
-        self.nodes.set(@intCast(block_index), block_node);
+        self.setNode(block_index, block_node);
 
         return block_index;
     }
@@ -380,7 +384,7 @@ pub const Parser = struct {
         }
 
         if_node.data = .init(cond_index, extra_index);
-        self.nodes.set(@intCast(if_index), if_node);
+        self.setNode(if_index, if_node);
 
         return if_index;
     }
@@ -394,7 +398,7 @@ pub const Parser = struct {
         try self.consume(.semicolon, error.ExpectedSemicolon);
 
         print_node.data.lhs = value_index;
-        self.nodes.set(@intCast(print_index), print_node);
+        self.setNode(print_index, print_node);
 
         return print_index;
     }
@@ -416,7 +420,7 @@ pub const Parser = struct {
 
         if (value_index) |index| {
             return_node.data.lhs = index;
-            self.nodes.set(@intCast(return_index), return_node);
+            self.setNode(return_index, return_node);
         }
         return return_index;
     }
@@ -434,7 +438,7 @@ pub const Parser = struct {
         const body_index = try self.statement();
 
         while_node.data = .init(cond_index, body_index);
-        self.nodes.set(@intCast(while_index), while_node);
+        self.setNode(while_index, while_node);
 
         return while_index;
     }
@@ -462,7 +466,7 @@ pub const Parser = struct {
                 .rhs = @intCast(self.extra.items.len + list.items.len),
             };
             try self.extra.appendSlice(self.allocator, list.items);
-            self.nodes.set(@intCast(block_index), block_node);
+            self.setNode(block_index, block_node);
         }
         return block_index;
     }
@@ -476,7 +480,7 @@ pub const Parser = struct {
         try self.consume(.semicolon, error.ExpectedSemicolon);
 
         expr_node.data.lhs = value_index;
-        self.nodes.set(@intCast(expr_index), expr_node);
+        self.setNode(expr_index, expr_node);
 
         return expr_index;
     }
@@ -488,7 +492,7 @@ pub const Parser = struct {
     pub fn assignment(self: *Parser) PaserError!u32 {
         const left_index = try self.logicOr();
 
-        if (self.tokens.get(self.index).tag == .equal) {
+        if (self.current().tag == .equal) {
             self.index += 1;
             const value_index = try self.assignment();
 
@@ -511,7 +515,7 @@ pub const Parser = struct {
     fn logicOr(self: *Parser) PaserError!u32 {
         var left_index = try self.logicAnd();
 
-        while (self.tokens.get(self.index).tag == .keyword_or) {
+        while (self.current().tag == .keyword_or) {
             const operator_index: u32 = @intCast(self.index);
             self.index += 1;
 
@@ -526,7 +530,7 @@ pub const Parser = struct {
     fn logicAnd(self: *Parser) PaserError!u32 {
         var left_index = try self.equality();
 
-        while (self.tokens.get(self.index).tag == .keyword_and) {
+        while (self.current().tag == .keyword_and) {
             const operator_index: u32 = @intCast(self.index);
             self.index += 1;
 
@@ -683,20 +687,19 @@ pub const Parser = struct {
         var list: ArrayList(u32) = .empty;
         defer list.deinit(self.allocator);
 
-        if (self.tokens.get(self.index).tag != .right_paren) {
+        if (self.current().tag != .right_paren) {
             while (true) {
                 if (list.items.len >= @as(usize, max_function_arity)) {
                     try self.report(error.TooManyArguments);
                 }
                 try list.append(self.allocator, try self.expression());
 
-                if (self.tokens.get(self.index).tag != .comma) break;
+                if (self.current().tag != .comma) break;
                 self.index += 1;
             }
         }
 
         const args_offset: u32 = @intCast(self.extra.items.len);
-
         try self.appendExtra(@intCast(list.items.len), list.items);
 
         return args_offset;
@@ -704,7 +707,7 @@ pub const Parser = struct {
 
     fn primary(self: *Parser) PaserError!u32 {
         const token_index: u32 = @intCast(self.index);
-        const token = self.tokens.get(self.index);
+        const token = self.current();
 
         switch (token.tag) {
             .keyword_this => {
@@ -785,7 +788,7 @@ pub const Parser = struct {
     }
 
     fn consume(self: *Parser, expected: Token.Tag, err: PaserError) PaserError!void {
-        if (self.tokens.get(self.index).tag != expected) {
+        if (self.current().tag != expected) {
             return err;
         }
         self.index += 1;
@@ -822,9 +825,13 @@ pub const Parser = struct {
         try tokenizer.report(self.ctx, self.source, token.loc.start, message);
     }
 
+    fn setNode(self: *Parser, index: u32, node: ast.Node) void {
+        self.nodes.set(@intCast(index), node);
+    }
+
     fn sync(self: *Parser) !void {
-        while (self.tokens.get(self.index).tag != .eof) {
-            switch (self.tokens.get(self.index).tag) {
+        while (self.current().tag != .eof) {
+            switch (self.current().tag) {
                 .keyword_class,
                 .keyword_fun,
                 .keyword_for,
