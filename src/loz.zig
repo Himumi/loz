@@ -1,23 +1,3 @@
-fn run(gpa: Allocator, ctx: *Context, source: [:0]const u8, is_repl: bool) !void {
-    var arena_allocator: ArenaAllocator = .init(gpa);
-    defer arena_allocator.deinit();
-
-    const arena = arena_allocator.allocator();
-
-    // Borrewed ast_tree to interpreter.
-    var tree = try parser.parse(arena, ctx, source);
-    tree.resolved = try resolver.resolve(arena, ctx, tree);
-    tree.symbols = try interner.resolve(arena, source, tree.tokens);
-
-    if (ctx.status.had_error) return;
-
-    if (is_repl) {
-        try interpreter.print(gpa, ctx, tree);
-    } else {
-        try interpreter.render(gpa, ctx, tree);
-    }
-}
-
 pub fn runPrompt(gpa: Allocator, ctx: *Context) !void {
     var arena_allocator: ArenaAllocator = .init(gpa);
     defer arena_allocator.deinit();
@@ -45,6 +25,7 @@ pub fn runPrompt(gpa: Allocator, ctx: *Context) !void {
         const source_offset = recorder.written().len;
         const tokens_offset = lexer.tokens.len;
 
+        // Read and merge the line to previous line.
         try readLine(writer, ctx.stream.in);
 
         const line = try recorder.toOwnedSliceSentinel(0);
@@ -102,7 +83,7 @@ pub fn runFile(gpa: Allocator, ctx: *Context) !void {
     defer arena_allocator.deinit();
 
     const arena = arena_allocator.allocator();
-    var recorder: ArrayList(u8) = .empty;
+    var recorder: Io.Writer.Allocating = .init(arena);
 
     while (true) {
         const line = ctx.stream.in.takeDelimiterInclusive('\n') catch |err|
@@ -110,13 +91,15 @@ pub fn runFile(gpa: Allocator, ctx: *Context) !void {
                 error.EndOfStream => break,
                 else => return err,
             };
-        try recorder.appendSlice(arena, line);
+        try recorder.writer.writeAll(line);
     }
-    run(gpa, ctx, try recorder.toOwnedSliceSentinel(arena, 0), false) catch |err| {
-        if (ctx.status.had_error) process.exit(65);
-        if (ctx.status.is_panic) process.exit(70);
-        return err;
-    };
+    const source = try recorder.toOwnedSliceSentinel(0);
+
+    var tree = try parser.parse(arena, ctx, source);
+    tree.resolved = try resolver.resolve(arena, ctx, tree);
+    tree.symbols = try interner.resolve(arena, source, tree.tokens);
+
+    try interpreter.render(gpa, ctx, tree);
     try ctx.stream.out.flush();
 }
 
