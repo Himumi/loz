@@ -116,6 +116,10 @@ pub const Node = struct {
         /// lhs: Value Expr
         /// rhs: 0
         assign,
+        /// token: Keyword Token
+        /// lhs: method Token
+        /// rhs: 0
+        super,
         /// token: Name Token
         /// lhs: 0
         /// rhs: 0
