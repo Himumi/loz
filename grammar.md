@@ -8,7 +8,8 @@
                  | statement ;
 - var_declaration  -> "var" IDENTIFIER ( "=" expression )? ";" ;
 - fun_declaration -> "fun" function ;
-- class_declaration -> "class" IDENTIFIER "{" function* "}" ;
+- class_declaration -> "class" IDENTIFIER ( "<" IDENTIFIER )?
+                       "{" function* "}" ;
 
 - function -> IDENTIFIER "(" parameters? ")" block_statement ;
 - parameters -> IDENTIFIER ( "," IDENTIFIER )* ;
