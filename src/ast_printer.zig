@@ -92,6 +92,12 @@ pub const Printer = struct {
                     value.data.lhs, // Value Expr
                 });
             },
+            .super => {
+                const method_lexeme = self.tree.getToken(value.data.lhs).lexeme(self.tree.source);
+                try self.parenthesize(indent, "<super {s}>", .{
+                    method_lexeme,
+                }, &.{});
+            },
             .this => {
                 const name = self.tree.tokens.get(value.token);
                 try self.parenthesize(indent, "this {s}", .{name.lexeme(self.tree.source)}, &.{});
