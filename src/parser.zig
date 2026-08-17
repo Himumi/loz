@@ -39,6 +39,8 @@ pub const Parser = struct {
         ExpectedRightParen,
         ExpectedRightBrace,
         ExpectedAnExpression,
+        ExpectedDotAfterSuper,
+        ExpectedSuperClassMethodName,
         ExpectedSemicolon,
         ExpectedVariableName,
         ExpectedFunctionName,
@@ -84,7 +86,7 @@ pub const Parser = struct {
         self.tokens = tokens;
         self.index = offset;
 
-        // Append the root node.
+        // Reserve the first index as node root.
         _ = try self.appendNode(.{ .tag = .root, .token = 0, .data = .empty });
 
         while (self.current().tag != .eof) {
@@ -240,13 +242,15 @@ pub const Parser = struct {
         const super_index: ?u32 = blk: {
             if (self.current().tag == .less) {
                 self.index += 1;
-                const super: ast.Node = .{
-                    .tag = .variable,
-                    .token = @intCast(self.index),
-                    .data = .empty,
-                };
+
+                const super_index: u32 = @intCast(self.index);
                 try self.consume(.identifier, error.ExpectedClassName);
-                break :blk try self.appendNode(super);
+
+                break :blk try self.appendNode(.{
+                    .tag = .variable,
+                    .token = super_index,
+                    .data = .empty,
+                });
             }
             break :blk null;
         };
@@ -268,13 +272,11 @@ pub const Parser = struct {
 
         const offset: u32 = @intCast(self.extra.items.len);
         if (list.items.len > 0) {
-            // try self.extra.appendSlice(self.allocator, list.items);
             try self.appendExtra(@intCast(list.items.len), list.items);
         } else {
             try self.appendExtra(0, &.{});
         }
 
-        // class_node.data = .init(offset, @intCast(self.extra.items.len));
         class_node.data.rhs = offset;
         self.setNode(class_index, class_node);
 
@@ -483,11 +485,12 @@ pub const Parser = struct {
         }
         try self.consume(.right_brace, error.ExpectedRightBrace);
 
-        if (list.items.len > 0) {
-            block_node.data = .{
-                .lhs = @intCast(self.extra.items.len),
-                .rhs = @intCast(self.extra.items.len + list.items.len),
-            };
+        const len: u32 = @intCast(list.items.len);
+        const offset: u32 = @intCast(self.extra.items.len);
+
+        if (len > 0) {
+            block_node.data = .{ .lhs = offset, .rhs = offset + len };
+
             try self.extra.appendSlice(self.allocator, list.items);
             self.setNode(block_index, block_node);
         }
@@ -733,6 +736,19 @@ pub const Parser = struct {
         const token = self.current();
 
         switch (token.tag) {
+            .keyword_super => {
+                self.index += 1;
+                try self.consume(.dot, error.ExpectedDotAfterSuper);
+
+                const method_index: u32 = @intCast(self.index);
+                try self.consume(.identifier, error.ExpectedSuperClassMethodName);
+
+                return try self.appendNode(.{
+                    .tag = .super,
+                    .token = token_index,
+                    .data = .{ .lhs = method_index, .rhs = 0 },
+                });
+            },
             .keyword_this => {
                 self.index += 1;
                 return try self.appendNode(.init(.this, token_index, .empty));
@@ -828,6 +844,8 @@ pub const Parser = struct {
             error.ExpectedRightParen => "Expected Right Parenthisize",
             error.ExpectedRightBrace => "Expected Right Brace",
             error.ExpectedAnExpression => "Expeceted An Expression",
+            error.ExpectedDotAfterSuper => "Expected Dot After Super",
+            error.ExpectedSuperClassMethodName => "Expected Super Class Method Name",
             error.ExpectedSemicolon => "Expected Semicolon",
             error.ExpectedVariableName => "Expected Variable Name",
             error.ExpectedFunctionName => "Expected Function Name",
@@ -1015,6 +1033,20 @@ test "parser" {
     try testParser(
         \\ class Mage < Person {}
     , "(class Mage < Person\n)");
+
+    try testParser(
+        \\ class User < Person {
+        \\   sayHello() {
+        \\     super.sayHello();
+        \\   }
+        \\  }
+    ,
+        \\(class User < Person
+        \\  (fun sayHello (block
+        \\    (call (<super sayHello>) ')')
+        \\  ))
+        \\)
+    );
 
     // Get Expression.
     try testParser(
