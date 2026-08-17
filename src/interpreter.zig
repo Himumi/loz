@@ -38,12 +38,17 @@ pub const Renderer = struct {
     const Distance = u32;
     const FunIndex = u32;
 
+    const super_symbol = @intFromEnum(Token.Tag.keyword_super);
+    const this_symbol = @intFromEnum(Token.Tag.keyword_this);
+
     pub const Error = error{
         InvalidBinaryOperands,
         InvalidUnaryOperand,
         InvalidFunctionArity,
         ExpectedCallable,
+        ExpectedClass,
         ExpectedFunction,
+        ExpectedInstance,
         ExpectedMethodFunction,
         ExpectedSuperClass,
         OnlyInstanceHasProperty,
@@ -82,7 +87,7 @@ pub const Renderer = struct {
             .had_return = null,
         };
 
-        // Append an empty class as class's super pointer.
+        // Reserve the first index as class root.
         _ = try renderer.appendClass(.empty);
         return renderer;
     }
@@ -166,6 +171,7 @@ pub const Renderer = struct {
             .set => try self.evalSet(gpa, node_index),
             .variable => try self.lookUp(node_index, node.token),
             .assign => try self.evalAssign(gpa, node_index),
+            .super => try self.evalSuper(node_index),
             .this => try self.lookUp(node_index, node.token),
 
             // // Statements //
@@ -268,9 +274,9 @@ pub const Renderer = struct {
 
     fn evalBlock(self: *Renderer, gpa: Allocator, block_index: u32) !ast.Object {
         const node = self.tree.getNode(block_index);
-        const list = self.tree.sliceExtra(node.data.lhs, node.data.rhs);
+        const node_list = self.tree.sliceExtra(node.data.lhs, node.data.rhs);
 
-        for (list) |index| {
+        for (node_list) |index| {
             _ = try self.evaluate(gpa, index);
 
             if (self.had_return) |result| {
@@ -288,12 +294,12 @@ pub const Renderer = struct {
         const arena = arena_allocator.allocator();
 
         const node = self.tree.getNode(call_index);
-        const token = self.tree.getToken(node.token);
+        const call_token = self.tree.getToken(node.token);
 
         const callee = try self.evaluate(arena, node.data.lhs);
 
         if (!callee.isFun() and !callee.isClass()) {
-            return self.panic(token, error.ExpectedCallable);
+            return self.panic(call_token, error.ExpectedCallable);
         }
 
         const offset = node.data.rhs + 1;
@@ -309,33 +315,39 @@ pub const Renderer = struct {
         // Validate the callable's arity with actual arguments length.
         const arity_len: usize = @intCast(self.arity(callee));
         if (list.items.len != arity_len) {
-            return self.panic(token, error.InvalidFunctionArity);
+            return self.panic(call_token, error.InvalidFunctionArity);
         }
 
         return switch (callee) {
             .fun => |fun_index| try self.callFn(arena, fun_index, list.items),
             .class => |class_index| try self.callClass(arena, class_index, list.items),
-            else => return self.panic(token, error.ExpectedCallable),
+            else => return self.panic(call_token, error.ExpectedCallable),
         };
     }
 
     fn evalClass(self: *Renderer, gpa: Allocator, class_index: u32) !ast.Object {
         const node = self.tree.getNode(class_index);
-
-        const super_object: ?ast.Object = blk: {
-            if (node.data.lhs == 0) break :blk null;
-
-            const object = try self.evaluate(gpa, node.data.lhs);
-            if (object == .class) {
-                break :blk object;
-            }
-
-            const super_node = self.tree.getNode(node.data.lhs);
-            return self.panic(self.tree.getToken(super_node.token), error.ExpectedSuperClass);
-        };
-
         const class_symbol = self.tree.getSymbol(node.token);
+        const super_node = self.tree.getNode(node.data.lhs);
+        const super_token = self.tree.getToken(super_node.token);
+
+        // Evaluate "super" Expression.
+        const super_object = try self.evalOptional(gpa, node.data.lhs);
+        if (super_object != .class and super_object != .nil) {
+            return self.panic(super_token, error.ExpectedSuperClass);
+        }
+
+        // Reserve class in Env.
         try self.env.define(self.allocator, class_symbol, .nil);
+        const previous_env = self.env;
+
+        // Create a new Env for "super" class.
+        if (node.data.lhs > 0) {
+            self.env = try Env.create(self.allocator, previous_env);
+            try self.env_list.append(self.allocator, self.env);
+            try self.env.define(self.allocator, super_symbol, super_object);
+        }
+        defer self.env = previous_env;
 
         var methods: ast.Store(u32) = .empty;
         errdefer methods.deinit(gpa);
@@ -347,6 +359,7 @@ pub const Renderer = struct {
         for (self.tree.sliceExtra(offset, offset + len)) |method_index| {
             const method_node = self.tree.getNode(method_index);
             const method_token = self.tree.getToken(method_node.token);
+            const method_symbol = self.tree.getSymbol(method_node.token);
 
             if (method_node.tag != .fun) {
                 return self.panic(method_token, error.ExpectedMethodFunction);
@@ -360,7 +373,7 @@ pub const Renderer = struct {
                 .arity = @intCast(self.tree.getExtra(method_node.data.lhs)),
                 .closure = self.env,
             });
-            try methods.append(self.allocator, self.tree.getSymbol(method_node.token), index);
+            try methods.append(self.allocator, method_symbol, index);
         }
 
         // Store the class's methods to interpreter's methods_list.
@@ -369,27 +382,31 @@ pub const Renderer = struct {
         // Store the class's Class to interpreter's class_list.
         const index = try self.appendClass(.{
             .stmt = class_index,
-            .super = if (super_object) |super| super.class else 0,
+            .super = if (super_object != .nil) super_object.class else 0,
             .methods = method_index,
         });
-        try self.env.assign(class_symbol, .{ .class = index });
+
+        // Reassign the class's value.
+        try previous_env.assign(class_symbol, .{ .class = index });
         return .nil;
     }
 
     fn evalFun(self: *Renderer, fun_index: u32) !ast.Object {
         const node = self.tree.getNode(fun_index);
 
-        const token = self.tree.getToken(node.token);
-        const lexeme = token.lexeme(self.tree.source);
-        const symbol = self.tree.getSymbol(node.token);
+        const fun_token = self.tree.getToken(node.token);
+        const fun_lexeme = fun_token.lexeme(self.tree.source);
+        const fun_symbol = self.tree.getSymbol(node.token);
+
+        const is_init = mem.eql(u8, fun_lexeme, "init");
 
         const index = try self.appendFun(.{
-            .tag = if (mem.eql(u8, lexeme, "init")) .init else .fun,
+            .tag = if (is_init) .init else .fun,
             .stmt = fun_index,
             .arity = @intCast(self.tree.getExtra(node.data.lhs)),
             .closure = self.env,
         });
-        try self.env.define(self.allocator, symbol, .{ .fun = index });
+        try self.env.define(self.allocator, fun_symbol, .{ .fun = index });
         return .nil;
     }
 
@@ -413,13 +430,13 @@ pub const Renderer = struct {
 
     fn evalGet(self: *Renderer, gpa: Allocator, get_index: u32) !ast.Object {
         const node = self.tree.getNode(get_index);
-        const token = self.tree.getToken(node.token);
+        const get_token = self.tree.getToken(node.token);
         const get_symbol = self.tree.getSymbol(node.token);
 
         const value = try self.evaluate(gpa, node.data.lhs);
 
         if (!value.isInstance()) {
-            return self.panic(token, error.OnlyInstanceHasProperty);
+            return self.panic(get_token, error.OnlyInstanceHasProperty);
         }
         const instance = self.getInstance(value.instance);
 
@@ -433,21 +450,24 @@ pub const Renderer = struct {
 
         // Get the instance's method.
         if (self.methods_list.items.len > 0) {
+            // Get the method from its class (override).
             const methods = self.getMethodPtr(instance.methods);
             if (methods.getForward(get_symbol)) |method| {
                 return try self.bind(method, value);
             }
 
+            // Get the method from its super class.
             const class = self.getClass(instance.class);
             if (class.super > 0) {
                 const super_class = self.getClass(class.super);
                 const super_methods = self.getMethodPtr(super_class.methods);
+
                 if (super_methods.getForward(get_symbol)) |method| {
                     return try self.bind(method, value);
                 }
             }
         }
-        return self.panic(token, error.UndefinedProperty);
+        return self.panic(get_token, error.UndefinedProperty);
     }
 
     fn evalLogical(self: *Renderer, gpa: Allocator, logical_index: u32) !ast.Object {
@@ -473,13 +493,13 @@ pub const Renderer = struct {
 
     fn evalSet(self: *Renderer, gpa: Allocator, set_index: u32) !ast.Object {
         const node = self.tree.getNode(set_index);
-        const token = self.tree.getToken(node.token);
+        const set_token = self.tree.getToken(node.token);
         const set_symbol = self.tree.getSymbol(node.token);
 
         const object = try self.evaluate(gpa, node.data.lhs);
 
         if (!object.isInstance()) {
-            return self.panic(token, error.OnlyInstanceHasProperty);
+            return self.panic(set_token, error.OnlyInstanceHasProperty);
         }
         const instance = self.getInstance(object.instance);
 
@@ -488,12 +508,46 @@ pub const Renderer = struct {
         // Set a new field or a new value to the target instance's fields_list.
         if (self.fields_list.items.len > 0) {
             const fields = self.getFieldsPtr(instance.fields);
+
             fields.setForward(set_symbol, value) catch {
                 try fields.append(self.allocator, set_symbol, value);
             };
             return value;
         }
-        return self.panic(token, error.UninitializedInstance);
+        return self.panic(set_token, error.UninitializedInstance);
+    }
+
+    fn evalSuper(self: *Renderer, super_index: u32) !ast.Object {
+        const node = self.tree.getNode(super_index);
+        const super_token = self.tree.getToken(node.token);
+        const method_token = self.tree.getToken(node.data.lhs);
+
+        if (self.tree.resolved.getForward(super_index)) |distance| {
+            const super_object = try self.env.lookUp(distance).get(super_symbol);
+
+            if (super_object != .class) {
+                return self.panic(super_token, error.ExpectedClass);
+            }
+
+            const instance = try self.env.lookUp(distance - 1).get(this_symbol);
+            if (instance != .instance) {
+                return self.panic(method_token, error.ExpectedInstance);
+            }
+
+            // Get the the target method.
+            if (self.class_list.items.len > 0) {
+                const super_class = self.getClass(super_object.class);
+
+                if (self.methods_list.items.len > 0) {
+                    const methods = self.getMethodPtr(super_class.methods);
+
+                    if (methods.getForward(self.tree.getSymbol(node.data.lhs))) |method| {
+                        return try self.bind(method, instance);
+                    }
+                }
+            }
+        }
+        return self.panic(super_token, error.UndefinedProperty);
     }
 
     fn evalUnary(self: *Renderer, gpa: Allocator, unary_index: u32) !ast.Object {
@@ -595,7 +649,7 @@ pub const Renderer = struct {
         const local_env = try Env.create(self.allocator, fun.closure);
         errdefer local_env.destroy(self.allocator);
 
-        try local_env.define(self.allocator, @intFromEnum(Token.Tag.keyword_this), this);
+        try local_env.define(self.allocator, this_symbol, this);
         try self.env_list.append(self.allocator, local_env);
 
         // Store the binded fun with instance to interpreter's instance_list.
@@ -624,13 +678,17 @@ pub const Renderer = struct {
         });
         const instance: ast.Object = .{ .instance = instance_index };
 
-        const methods = self.getMethodPtr(class.methods);
-        for (methods.entries.items(.value)) |fun_index| {
-            const fun = self.getFun(fun_index);
-            if (fun.tag == .init) {
-                // Bind the initializer method with the instance.
-                const binded = try self.bind(fun_index, instance);
-                return try self.callFn(gpa, binded.fun, args);
+        if (self.methods_list.items.len > 0) {
+            const methods = self.getMethodPtr(class.methods);
+
+            for (methods.entries.items(.value)) |fun_index| {
+                const fun = self.getFun(fun_index);
+
+                if (fun.tag == .init) {
+                    // Bind the initializer method with the instance.
+                    const binded = try self.bind(fun_index, instance);
+                    return try self.callFn(gpa, binded.fun, args);
+                }
             }
         }
         return instance;
@@ -645,16 +703,13 @@ pub const Renderer = struct {
         const fun = self.getFun(fun_index);
         const fun_node = self.tree.getNode(fun.stmt);
 
-        const global_env = self.env;
-        defer self.env = global_env;
-
-        var fun_env = fun.closure;
-        fun_env.enclosing = global_env;
-        defer fun_env.enclosing = null;
+        const previous_env = self.env;
+        defer self.env = previous_env;
 
         // The local_env belongs to global allocator.
-        const local_env = try Env.create(self.allocator, fun_env);
+        const local_env = try Env.create(self.allocator, fun.closure);
         errdefer local_env.destroy(self.allocator);
+
         self.env = local_env;
 
         const len = self.tree.getExtra(fun_node.data.lhs);
@@ -662,8 +717,8 @@ pub const Renderer = struct {
 
         // Transfer arguments' ownership to local_env.
         for (self.tree.sliceExtra(offset, offset + len), 0..) |param_index, i| {
-            const symbol = self.tree.getSymbol(param_index);
-            try self.env.define(self.allocator, symbol, args[i]);
+            const param_symbol = self.tree.getSymbol(param_index);
+            try self.env.define(self.allocator, param_symbol, args[i]);
         }
 
         // Evaluate the function body.
@@ -678,17 +733,17 @@ pub const Renderer = struct {
 
         // Return This' instance for a class initializer.
         if (fun.tag == .init) {
-            return try fun_env.get(@intFromEnum(Token.Tag.keyword_this));
+            return try fun.closure.get(this_symbol);
         }
         return object;
     }
 
     fn concat(self: *Renderer, left: ast.String, right: ast.String) !ast.String {
-        const left_index = try self.appendString(left);
-        const right_index = try self.appendString(right);
-
         return .{
-            .concat = .{ .left = left_index, .right = right_index },
+            .concat = .{
+                .left = try self.appendString(left),
+                .right = try self.appendString(right),
+            },
         };
     }
 
@@ -696,17 +751,17 @@ pub const Renderer = struct {
         switch (object) {
             .number => |number| try writer.print("{}", .{number}),
             .boolean => |boolean| try writer.print("{}", .{boolean}),
-            .nil => try writer.writeAll("nil"),
             .string => |string| try self.dumpString(writer, string),
             .class => |class_index| try self.dumpClass(writer, class_index),
             .fun => |fun_index| try self.dumpFun(writer, fun_index),
             .instance => |instance_index| try self.dumpInstance(writer, instance_index),
+            .nil => try writer.writeAll("nil"),
         }
     }
 
     pub fn dumpln(self: Renderer, writer: *Io.Writer, object: ast.Object) !void {
         try self.dump(writer, object);
-        try self.ctx.stream.out.writeByte('\n');
+        try writer.writeByte('\n');
     }
 
     fn dumpClass(self: Renderer, writer: *Io.Writer, class_index: u32) !void {
@@ -805,6 +860,7 @@ pub const Renderer = struct {
 
         try self.dumpString(&buffer.writer, a);
         const offset = buffer.written().len;
+
         try self.dumpString(&buffer.writer, b);
 
         const written = buffer.written();
@@ -840,8 +896,10 @@ pub const Renderer = struct {
             error.InvalidBinaryOperands => "Invalid Binary Operands",
             error.InvalidUnaryOperand => "Invalid Unary Operands",
             error.InvalidFunctionArity => "Invalid Function Arity",
+            error.ExpectedClass => "Expected A Class",
             error.ExpectedCallable => "Expected A Callable",
             error.ExpectedFunction => "Expected A Function",
+            error.ExpectedInstance => "Expected An Instance",
             error.ExpectedMethodFunction => "Expected A Method Function",
             error.ExpectedSuperClass => "Expected A Super Class",
             error.OnlyInstanceHasProperty => "Only Instance Has Proprety",
@@ -854,7 +912,7 @@ pub const Renderer = struct {
 };
 
 test "Renderer" {
-    // // Literal Evaluation
+    // Literal Evaluation
     try testInterpreter("10;", "10");
     try testInterpreter("12.34;", "12.34");
     try testInterpreter("false;", "false");
@@ -1076,6 +1134,28 @@ test "Renderer" {
         \\
         \\ BostonCream().cook();
     , "nilnilFry until golden brown.\nnil");
+
+    try testInterpreter(
+        \\ class A {
+        \\   method() {
+        \\     print "A method";
+        \\   }
+        \\ }
+        \\
+        \\ class B < A {
+        \\   method() {
+        \\     print "B method";
+        \\   }
+        \\
+        \\   test() {
+        \\     super.method();
+        \\   }
+        \\ }
+        \\
+        \\ class C < B {}
+        \\
+        \\ C().test();
+    , "nilnilnilA method\nnil");
 }
 
 fn testInterpreter(
