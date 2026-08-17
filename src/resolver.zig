@@ -21,7 +21,7 @@ pub const Resolver = struct {
     class_kind: ClassKind = .none,
 
     const FunKind = enum { none, function, initializer, method };
-    const ClassKind = enum { none, class };
+    const ClassKind = enum { none, class, subclass };
 
     /// NOTE: Store Node index (u32) as key and distance (usize) as value
     /// TODO: Need to implement binary search, it is sorted by default.
@@ -96,7 +96,7 @@ pub const Resolver = struct {
             },
             .variable => {
                 if (self.scopes.items.len == 0) return;
-                const scope = self.scopes.getLast();
+                const scope = self.getLastScopePtr();
 
                 const token = self.tree.getToken(node.token);
                 if (scope.get(token.lexeme(self.tree.source))) |value| {
@@ -112,6 +112,21 @@ pub const Resolver = struct {
                 try self.resolveNode(node.data.lhs);
                 const token = self.tree.getToken(node.token);
                 try self.resolveLocal(node_index, token);
+            },
+            .super => {
+                const keyword_token = self.tree.getToken(node.token);
+                if (self.class_kind == .none) {
+                    try self.report(
+                        keyword_token,
+                        "Can't use 'super' outside of a class.",
+                    );
+                } else if (self.class_kind != .subclass) {
+                    try self.report(
+                        keyword_token,
+                        "Can't use 'super' in a class with no super class.",
+                    );
+                }
+                try self.resolveLocal(node_index, keyword_token);
             },
             .this => {
                 const token = self.tree.getToken(node.token);
@@ -199,26 +214,38 @@ pub const Resolver = struct {
                     if (mem.eql(u8, class_lexeme, super_lexeme)) {
                         try self.report(super_token, "A class can't inherit from itself.");
                     }
+                }
 
+                if (super_index > 0) {
+                    self.class_kind = .subclass;
                     try self.resolveNode(super_index);
                 }
 
-                try self.begin();
-                defer self.end();
+                if (super_index > 0) {
+                    try self.begin();
+                    try self.getLastScopePtr().put("super", true);
+                }
+                defer if (super_index > 0) self.end();
 
-                try self.scopes.items[self.scopes.items.len - 1].put("this", true);
+                // Resolve Class methods.
+                {
+                    try self.begin();
+                    defer self.end();
 
-                const offset = node.data.rhs + 1;
-                const len = self.tree.getExtra(node.data.rhs);
+                    try self.getLastScopePtr().put("this", true);
 
-                for (self.tree.sliceExtra(offset, offset + len)) |method_index| {
-                    const method = self.tree.getNode(method_index);
-                    const token = self.tree.getToken(method.token);
+                    const offset = node.data.rhs + 1;
+                    const len = self.tree.getExtra(node.data.rhs);
 
-                    const is_init = mem.eql(u8, token.lexeme(self.tree.source), "init");
-                    const declaration: FunKind = if (is_init) .initializer else .method;
+                    for (self.tree.sliceExtra(offset, offset + len)) |method_index| {
+                        const method = self.tree.getNode(method_index);
+                        const token = self.tree.getToken(method.token);
 
-                    try self.resolveFun(method, declaration);
+                        const is_init = mem.eql(u8, token.lexeme(self.tree.source), "init");
+                        const declaration: FunKind = if (is_init) .initializer else .method;
+
+                        try self.resolveFun(method, declaration);
+                    }
                 }
             },
         }
@@ -261,6 +288,7 @@ pub const Resolver = struct {
                 self.resolved.setBackward(node_index, value) catch {
                     try self.resolved.append(self.allocator, node_index, value);
                 };
+                return;
             }
         }
     }
@@ -279,7 +307,7 @@ pub const Resolver = struct {
 
         const lexeme = value.lexeme(self.tree.source);
 
-        var scope = &self.scopes.items[self.scopes.items.len - 1];
+        var scope = self.getLastScopePtr();
         if (scope.contains(lexeme)) {
             try self.report(value, "Already a variable with this name in this scope.");
         }
@@ -289,8 +317,12 @@ pub const Resolver = struct {
     fn define(self: *Resolver, value: Token) !void {
         if (self.scopes.items.len == 0) return;
 
-        var scope = &self.scopes.items[self.scopes.items.len - 1];
+        var scope = self.getLastScopePtr();
         try scope.put(value.lexeme(self.tree.source), true);
+    }
+
+    fn getLastScopePtr(self: *Resolver) *StringHashMap(bool) {
+        return &self.scopes.items[self.scopes.items.len - 1];
     }
 
     fn report(self: Resolver, value: Token, message: []const u8) !void {
@@ -359,6 +391,30 @@ test "resolver" {
         .{ 9, 0 },
         .{ 14, 0 },
     });
+
+    try testResolver(
+        \\ class A {
+        \\   method() {
+        \\     print "A method";
+        \\   }
+        \\ }
+        \\
+        \\ class B < A {
+        \\   method() {
+        \\     print "B method";
+        \\   }
+        \\
+        \\   test() {
+        \\     super.method();
+        \\   }
+        \\ }
+        \\
+        \\ class C < B {}
+        \\
+        \\ C().test();
+    , &.{
+        .{ 15, 2 },
+    });
 }
 
 test "fails resolver" {
@@ -398,6 +454,7 @@ fn testResolver(source: [:0]const u8, expected_list: []const struct { u32, usize
     var resolved = try resolve(gpa, &ctx, tree);
     defer resolved.deinit(gpa);
 
+    try testing.expectEqual(expected_list.len, resolved.entries.len);
     for (expected_list) |expected| {
         const key_index = resolved.lookUpForward(expected[0]) orelse {
             return error.NotFoundLocal;
