@@ -1,7 +1,7 @@
 /// print prints expression into (not)pretty format.
 pub fn print(writer: *Io.Writer, tree: ast.Ast, node: u32) Io.Writer.Error!void {
     var printer: Printer = .init(writer, tree);
-    try printer.print(node, 0);
+    try printer.print(0, node);
 }
 
 pub const Printer = struct {
@@ -18,6 +18,7 @@ pub const Printer = struct {
     pub fn print(self: *Printer, indent: usize, node: u32) Io.Writer.Error!void {
         const value = self.tree.nodes.get(node);
         return switch (value.tag) {
+            .root => try self.writer.writeAll("<root>"),
             // Expressions //
 
             .binary => {
@@ -173,8 +174,25 @@ pub const Printer = struct {
             },
             .class => {
                 const lexeme = self.tree.tokens.get(value.token).lexeme(self.tree.source);
-                const list = self.tree.extra[value.data.lhs..value.data.rhs];
-                try self.parenthesizeIndent(indent, "class {s}", .{lexeme}, list);
+                // const list = self.tree.extra[value.data.lhs..value.data.rhs];
+
+                const offset = value.data.rhs + 1;
+                const len = self.tree.getExtra(value.data.rhs);
+                const list = self.tree.sliceExtra(offset, offset + len);
+
+                if (value.data.lhs != 0) {
+                    const super_node = self.tree.getNode(value.data.lhs);
+                    const super_token = self.tree.getToken(super_node.token);
+                    const super_lexeme = super_token.lexeme(self.tree.source);
+                    try self.parenthesizeIndent(
+                        indent,
+                        "class {s} < {s}",
+                        .{ lexeme, super_lexeme },
+                        list,
+                    );
+                } else {
+                    try self.parenthesizeIndent(indent, "class {s}", .{lexeme}, list);
+                }
             },
         };
     }

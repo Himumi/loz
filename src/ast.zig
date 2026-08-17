@@ -75,6 +75,7 @@ pub const Node = struct {
     }
 
     const Tag = enum {
+        root,
         // Expressions //
 
         /// token: Operator Token
@@ -150,8 +151,8 @@ pub const Node = struct {
         /// rhs: List end index
         block,
         /// token: Name Token
-        /// lhs: Methods start index
-        /// rhs: Methods end index
+        /// lhs: 0 orelse Super Expr
+        /// rhs: Extra Node: [len, methods...]
         class,
     };
 };
@@ -482,10 +483,16 @@ pub const Class = struct {
     super: Index,
     /// It Points to interpreter's classes_methods.
     methods: Index,
+
+    pub const empty: Class = .{
+        .stmt = 0,
+        .super = 0,
+        .methods = 0,
+    };
 };
 
 pub const Instance = struct {
-    stmt: Index,
+    class: Index,
     /// It Points to interpreter's instances_fields.
     fields: Index,
     /// It Points to interpreter's classes_methods.

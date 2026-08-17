@@ -45,6 +45,7 @@ pub const Renderer = struct {
         ExpectedCallable,
         ExpectedFunction,
         ExpectedMethodFunction,
+        ExpectedSuperClass,
         OnlyInstanceHasProperty,
         NotFoundString,
         UndefinedProperty,
@@ -60,7 +61,7 @@ pub const Renderer = struct {
 
         try env_list.append(gpa, env);
 
-        return .{
+        var renderer: Renderer = .{
             .allocator = gpa,
             .ctx = ctx,
             .tree = undefined,
@@ -80,6 +81,10 @@ pub const Renderer = struct {
 
             .had_return = null,
         };
+
+        // Append an empty class as class's super pointer.
+        _ = try renderer.appendClass(.empty);
+        return renderer;
     }
 
     pub fn deinit(self: *Renderer) void {
@@ -148,6 +153,7 @@ pub const Renderer = struct {
     fn evaluate(self: *Renderer, gpa: Allocator, node_index: u32) RendererError!ast.Object {
         const node = self.tree.getNode(node_index);
         return switch (node.tag) {
+            .root => .nil,
             // Expressions //
 
             .binary => try self.evalBinary(gpa, node_index),
@@ -316,14 +322,29 @@ pub const Renderer = struct {
     fn evalClass(self: *Renderer, gpa: Allocator, class_index: u32) !ast.Object {
         const node = self.tree.getNode(class_index);
 
+        const super_object: ?ast.Object = blk: {
+            if (node.data.lhs == 0) break :blk null;
+
+            const object = try self.evaluate(gpa, node.data.lhs);
+            if (object == .class) {
+                break :blk object;
+            }
+
+            const super_node = self.tree.getNode(node.data.lhs);
+            return self.panic(self.tree.getToken(super_node.token), error.ExpectedSuperClass);
+        };
+
         const class_symbol = self.tree.getSymbol(node.token);
         try self.env.define(self.allocator, class_symbol, .nil);
 
         var methods: ast.Store(u32) = .empty;
         errdefer methods.deinit(gpa);
 
+        const len = self.tree.getExtra(node.data.rhs);
+        const offset = node.data.rhs + 1;
+
         // Map the class's methods.
-        for (self.tree.sliceExtra(node.data.lhs, node.data.rhs)) |method_index| {
+        for (self.tree.sliceExtra(offset, offset + len)) |method_index| {
             const method_node = self.tree.getNode(method_index);
             const method_token = self.tree.getToken(method_node.token);
 
@@ -348,7 +369,7 @@ pub const Renderer = struct {
         // Store the class's Class to interpreter's class_list.
         const index = try self.appendClass(.{
             .stmt = class_index,
-            .super = 0,
+            .super = if (super_object) |super| super.class else 0,
             .methods = method_index,
         });
         try self.env.assign(class_symbol, .{ .class = index });
@@ -415,6 +436,15 @@ pub const Renderer = struct {
             const methods = self.getMethodPtr(instance.methods);
             if (methods.getForward(get_symbol)) |method| {
                 return try self.bind(method, value);
+            }
+
+            const class = self.getClass(instance.class);
+            if (class.super > 0) {
+                const super_class = self.getClass(class.super);
+                const super_methods = self.getMethodPtr(super_class.methods);
+                if (super_methods.getForward(get_symbol)) |method| {
+                    return try self.bind(method, value);
+                }
             }
         }
         return self.panic(token, error.UndefinedProperty);
@@ -588,7 +618,7 @@ pub const Renderer = struct {
         const fields_index = try self.appendFields(.empty);
 
         const instance_index = try self.appendInstance(.{
-            .stmt = class_index,
+            .class = class_index,
             .fields = fields_index,
             .methods = class.methods,
         });
@@ -695,8 +725,9 @@ pub const Renderer = struct {
 
     fn dumpInstance(self: Renderer, writer: *Io.Writer, instance_index: u32) !void {
         const instance = self.getInstance(instance_index);
-        const instance_node = self.tree.getNode(instance.stmt);
-        const instance_token = self.tree.getToken(instance_node.token);
+        const class = self.getClass(instance.class);
+        const class_node = self.tree.getNode(class.stmt);
+        const instance_token = self.tree.getToken(class_node.token);
         try writer.print("<instance {s}>", .{instance_token.lexeme(self.tree.source)});
     }
 
@@ -812,6 +843,7 @@ pub const Renderer = struct {
             error.ExpectedCallable => "Expected A Callable",
             error.ExpectedFunction => "Expected A Function",
             error.ExpectedMethodFunction => "Expected A Method Function",
+            error.ExpectedSuperClass => "Expected A Super Class",
             error.OnlyInstanceHasProperty => "Only Instance Has Proprety",
             error.NotFoundString => "Not Found String",
             error.UndefinedProperty => "Undefined Property",
@@ -1032,6 +1064,18 @@ test "Renderer" {
         \\ var john = User("John");
         \\ john.greet();
     , "nil<instance User>hello, I am John\nnil");
+
+    try testInterpreter(
+        \\ class Doughnut {
+        \\   cook() {
+        \\     print "Fry until golden brown.";
+        \\   }
+        \\ }
+        \\
+        \\ class BostonCream < Doughnut {}
+        \\
+        \\ BostonCream().cook();
+    , "nilnilFry until golden brown.\nnil");
 }
 
 fn testInterpreter(

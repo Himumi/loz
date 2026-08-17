@@ -77,7 +77,7 @@ pub fn get(self: *EnvSoa, key: u32) error{UndefinedVariable}!ast.Object {
 pub fn lookUp(self: *EnvSoa, distance: usize) *EnvSoa {
     var env = self;
     for (0..distance) |_| {
-        if (self.enclosing) |enclosing| {
+        if (env.enclosing) |enclosing| {
             env = enclosing;
         } else {
             break;

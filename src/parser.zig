@@ -84,6 +84,9 @@ pub const Parser = struct {
         self.tokens = tokens;
         self.index = offset;
 
+        // Append the root node.
+        _ = try self.appendNode(.{ .tag = .root, .token = 0, .data = .empty });
+
         while (self.current().tag != .eof) {
             if (self.declaration()) |parent_index| {
                 try self.roots.append(self.allocator, @intCast(parent_index));
@@ -230,10 +233,26 @@ pub const Parser = struct {
         var class_node: ast.Node = .init(.class, @intCast(self.index), .empty);
 
         try self.consume(.identifier, error.ExpectedClassName);
-        try self.consume(.left_brace, error.ExpectedLeftBrace);
 
         // NOTE: Append the class node first (parent).
         const class_index = try self.appendNode(class_node);
+
+        const super_index: ?u32 = blk: {
+            if (self.current().tag == .less) {
+                self.index += 1;
+                const super: ast.Node = .{
+                    .tag = .variable,
+                    .token = @intCast(self.index),
+                    .data = .empty,
+                };
+                try self.consume(.identifier, error.ExpectedClassName);
+                break :blk try self.appendNode(super);
+            }
+            break :blk null;
+        };
+        class_node.data.lhs = if (super_index) |index| index else 0;
+
+        try self.consume(.left_brace, error.ExpectedLeftBrace);
 
         var list: ArrayList(u32) = .empty;
         defer list.deinit(self.allocator);
@@ -249,10 +268,14 @@ pub const Parser = struct {
 
         const offset: u32 = @intCast(self.extra.items.len);
         if (list.items.len > 0) {
-            try self.extra.appendSlice(self.allocator, list.items);
+            // try self.extra.appendSlice(self.allocator, list.items);
+            try self.appendExtra(@intCast(list.items.len), list.items);
+        } else {
+            try self.appendExtra(0, &.{});
         }
 
-        class_node.data = .init(offset, @intCast(self.extra.items.len));
+        // class_node.data = .init(offset, @intCast(self.extra.items.len));
+        class_node.data.rhs = offset;
         self.setNode(class_index, class_node);
 
         return class_index;
@@ -988,6 +1011,10 @@ test "parser" {
         \\  ))
         \\)
     );
+
+    try testParser(
+        \\ class Mage < Person {}
+    , "(class Mage < Person\n)");
 
     // Get Expression.
     try testParser(

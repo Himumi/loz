@@ -61,6 +61,7 @@ pub const Resolver = struct {
     fn resolveNode(self: *Resolver, node_index: u32) Error!void {
         const node = self.tree.nodes.get(@intCast(node_index));
         switch (node.tag) {
+            .root => {},
             .binary => {
                 try self.resolveNode(node.data.lhs);
                 try self.resolveNode(node.data.rhs);
@@ -188,12 +189,29 @@ pub const Resolver = struct {
                 try self.declare(name);
                 try self.define(name);
 
+                const class_lexeme = self.tree.getToken(node.token).lexeme(self.tree.source);
+
+                const super_index = node.data.lhs;
+                if (super_index > 0) {
+                    const super_token = self.tree.getToken(self.tree.getNode(super_index).token);
+                    const super_lexeme = super_token.lexeme(self.tree.source);
+
+                    if (mem.eql(u8, class_lexeme, super_lexeme)) {
+                        try self.report(super_token, "A class can't inherit from itself.");
+                    }
+
+                    try self.resolveNode(super_index);
+                }
+
                 try self.begin();
                 defer self.end();
 
                 try self.scopes.items[self.scopes.items.len - 1].put("this", true);
 
-                for (self.tree.sliceExtra(node.data.lhs, node.data.rhs)) |method_index| {
+                const offset = node.data.rhs + 1;
+                const len = self.tree.getExtra(node.data.rhs);
+
+                for (self.tree.sliceExtra(offset, offset + len)) |method_index| {
                     const method = self.tree.getNode(method_index);
                     const token = self.tree.getToken(method.token);
 
@@ -263,7 +281,7 @@ pub const Resolver = struct {
 
         var scope = &self.scopes.items[self.scopes.items.len - 1];
         if (scope.contains(lexeme)) {
-            return try self.report(value, "Already a variable with this name in this scope.");
+            try self.report(value, "Already a variable with this name in this scope.");
         }
         try scope.put(lexeme, false);
     }
@@ -323,7 +341,7 @@ test "resolver" {
         \\   }
         \\ }
     , &.{
-        .{ 6, 1 },
+        .{ 7, 1 },
     });
 
     try testResolver(
@@ -338,8 +356,8 @@ test "resolver" {
         \\    showA();
         \\ }
     , &.{
-        .{ 8, 0 },
-        .{ 13, 0 },
+        .{ 9, 0 },
+        .{ 14, 0 },
     });
 }
 
