@@ -72,7 +72,7 @@ pub const Parser = struct {
     /// It does not reset the index tracker.
     ///
     /// NOTE: The caller has to append new data to the previous
-    /// to keep parsing follows the gevin offset.
+    /// to keep parsing follows the given offset.
     pub fn parse(
         self: *Parser,
         /// Borrow the source memory.
