@@ -261,13 +261,9 @@ pub const Lexer = struct {
                             },
                         };
                     },
-                    ' ', '\r', '\t' => {
+                    ' ', '\r', '\n', '\t' => {
                         self.index += 1;
                         result.loc.start = @intCast(self.index);
-                        continue :state .start;
-                    },
-                    '\n' => {
-                        self.index += 1;
                         continue :state .start;
                     },
                     '(' => {
