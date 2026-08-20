@@ -20,6 +20,7 @@ pub const Renderer = struct {
     tree: ast.Ast,
 
     env: *Env,
+    // TODO: Need to reduce garbage memory.
     env_list: ArrayList(*Env),
 
     // Rope Strings store.
@@ -162,7 +163,7 @@ pub const Renderer = struct {
             // Expressions //
 
             .binary => try self.evalBinary(gpa, node_index),
-            .call => try self.evalCall(node_index),
+            .call => try self.evalCall(gpa, node_index),
             .get => try self.evalGet(gpa, node_index),
             .group => try self.evaluate(gpa, node.data.lhs),
             .unary => try self.evalUnary(gpa, node_index),
@@ -193,7 +194,7 @@ pub const Renderer = struct {
                 try self.env.define(self.allocator, self.tree.getSymbol(node.token), object);
                 return object;
             },
-            .@"while" => try self.evalWhile(node_index),
+            .@"while" => try self.evalWhile(gpa, node_index),
             .block => try self.evalBlock(gpa, node_index),
             .class => try self.evalClass(gpa, node_index),
         };
@@ -276,6 +277,15 @@ pub const Renderer = struct {
         const node = self.tree.getNode(block_index);
         const node_list = self.tree.sliceExtra(node.data.lhs, node.data.rhs);
 
+        const local_env = try Env.create(self.allocator, self.env);
+        // TODO: Need to find a way to reduce garbage memory.
+        try self.env_list.append(self.allocator, local_env);
+
+        const global_env = self.env;
+        defer self.env = global_env;
+
+        self.env = local_env;
+
         for (node_list) |index| {
             _ = try self.evaluate(gpa, index);
 
@@ -287,16 +297,11 @@ pub const Renderer = struct {
         return .nil;
     }
 
-    fn evalCall(self: *Renderer, call_index: u32) !ast.Object {
-        var arena_allocator: std.heap.ArenaAllocator = .init(self.allocator);
-        defer arena_allocator.deinit();
-
-        const arena = arena_allocator.allocator();
-
+    fn evalCall(self: *Renderer, gpa: Allocator, call_index: u32) !ast.Object {
         const node = self.tree.getNode(call_index);
         const call_token = self.tree.getToken(node.token);
 
-        const callee = try self.evaluate(arena, node.data.lhs);
+        const callee = try self.evaluate(gpa, node.data.lhs);
 
         if (!callee.isFun() and !callee.isClass()) {
             return self.panic(call_token, error.ExpectedCallable);
@@ -305,11 +310,12 @@ pub const Renderer = struct {
         const offset = node.data.rhs + 1;
         const len = self.tree.getExtra(node.data.rhs);
 
-        var list: ArrayList(ast.Object) = try .initCapacity(arena, @intCast(len));
+        var list: ArrayList(ast.Object) = try .initCapacity(gpa, @intCast(len));
+        defer list.deinit(gpa);
 
         // Append the evaluated arguments to a list.
         for (self.tree.sliceExtra(offset, offset + len)) |arg_index| {
-            try list.append(arena, try self.evaluate(arena, arg_index));
+            try list.append(gpa, try self.evaluate(gpa, arg_index));
         }
 
         // Validate the callable's arity with actual arguments length.
@@ -319,8 +325,8 @@ pub const Renderer = struct {
         }
 
         return switch (callee) {
-            .fun => |fun_index| try self.callFn(arena, fun_index, list.items),
-            .class => |class_index| try self.callClass(arena, class_index, list.items),
+            .fun => |fun_index| try self.callFn(gpa, fun_index, list.items),
+            .class => |class_index| try self.callClass(gpa, class_index, list.items),
             else => return self.panic(call_token, error.ExpectedCallable),
         };
     }
@@ -568,16 +574,10 @@ pub const Renderer = struct {
         };
     }
 
-    fn evalWhile(self: *Renderer, while_index: u32) !ast.Object {
-        var arena_allocator: std.heap.ArenaAllocator = .init(self.allocator);
-        defer arena_allocator.deinit();
-
-        const arena = arena_allocator.allocator();
+    fn evalWhile(self: *Renderer, gpa: Allocator, while_index: u32) !ast.Object {
         const node = self.tree.getNode(while_index);
-
-        while (isTruthy(try self.evaluate(arena, node.data.lhs))) {
-            _ = try self.evaluate(arena, node.data.rhs);
-            _ = arena_allocator.reset(.retain_capacity);
+        while (isTruthy(try self.evaluate(gpa, node.data.lhs))) {
+            _ = try self.evaluate(gpa, node.data.rhs);
         }
         return .nil;
     }
@@ -1082,7 +1082,7 @@ test "Renderer" {
         \\   var a = "block";
         \\   showA();
         \\ }
-    , "globalglobal\nblock\nnil");
+    , "globalglobal\nglobal\nnil");
 
     // Classes Evaluation
     try testInterpreter(
@@ -1156,6 +1156,22 @@ test "Renderer" {
         \\
         \\ C().test();
     , "nilnilnilA method\nnil");
+
+    try testInterpreter(
+        \\ fun fib(n) {
+        \\   var a = 0;
+        \\   var b = 1;
+        \\   var i = 0;
+        \\   while (i < n) {
+        \\     var temp = a + b;
+        \\     a = b;
+        \\     b = temp;
+        \\     i = i + 1;
+        \\   }
+        \\   return a;
+        \\ }
+        \\ print fib(10);
+    , "nil55\nnil");
 }
 
 fn testInterpreter(
