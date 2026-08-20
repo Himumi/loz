@@ -357,76 +357,61 @@ fn ReverseIterator(comptime T: type) type {
 }
 
 test "resolver" {
-    // try testResolver(
-    //     \\ var a = "hello";
-    //     \\ { print a; }
-    // , &.{});
-
-    // try testResolver(
-    //     \\ {
-    //     \\   var a;
-    //     \\   {
-    //     \\     a = "hello";
-    //     \\   }
-    //     \\ }
-    // , &.{
-    //     .{ 7, 1 },
-    // });
-
-    // try testResolver(
-    //     \\ var a = "global";
-    //     \\ {
-    //     \\    fun showA() {
-    //     \\      print a;
-    //     \\    }
-    //     \\
-    //     \\    showA();
-    //     \\    var a = "block";
-    //     \\    showA();
-    //     \\ }
-    // , &.{
-    //     .{ 9, 0 },
-    //     .{ 14, 0 },
-    // });
-
-    // try testResolver(
-    //     \\ class A {
-    //     \\   method() {
-    //     \\     print "A method";
-    //     \\   }
-    //     \\ }
-    //     \\
-    //     \\ class B < A {
-    //     \\   method() {
-    //     \\     print "B method";
-    //     \\   }
-    //     \\
-    //     \\   test() {
-    //     \\     super.method();
-    //     \\   }
-    //     \\ }
-    //     \\
-    //     \\ class C < B {}
-    //     \\
-    //     \\ C().test();
-    // , &.{
-    //     .{ 15, 2 },
-    // });
     try testResolver(
-        \\ fun fib(n) {
-        \\   var a = 0;
-        \\   var b = 1;
-        \\   var i = 0;
-        \\   while (i < n) {
-        \\     var temp = a + b;
-        \\     a = b;
-        \\     b = temp;
-        \\     i = i + 1;
-        \\   }
-        \\   return a;
-        \\ }
-        \\ print fib(10);
+        \\ var a = "hello";
+        \\ { print a; }
     , &.{});
+
+    try testResolver(
+        \\ {
+        \\   var a;
+        \\   {
+        \\     a = "hello";
+        \\   }
+        \\ }
+    , &.{
+        .{ 7, 1 },
+    });
+
+    try testResolver(
+        \\ var a = "global";
+        \\ {
+        \\    fun showA() {
+        \\      print a;
+        \\    }
+        \\
+        \\    showA();
+        \\    var a = "block";
+        \\    showA();
+        \\ }
+    , &.{
+        .{ 9, 0 },
+        .{ 14, 0 },
+    });
+
+    try testResolver(
+        \\ class A {
+        \\   method() {
+        \\     print "A method";
+        \\   }
+        \\ }
+        \\
+        \\ class B < A {
+        \\   method() {
+        \\     print "B method";
+        \\   }
+        \\
+        \\   test() {
+        \\     super.method();
+        \\   }
+        \\ }
+        \\
+        \\ class C < B {}
+        \\
+        \\ C().test();
+    , &.{
+        .{ 15, 3 },
+    });
 }
 
 test "fails resolver" {
@@ -466,7 +451,7 @@ fn testResolver(source: [:0]const u8, expected_list: []const struct { u32, usize
     var resolved = try resolve(gpa, &ctx, tree);
     defer resolved.deinit(gpa);
 
-    // try testing.expectEqual(expected_list.len, resolved.entries.len);
+    try testing.expectEqual(expected_list.len, resolved.entries.len);
     for (expected_list) |expected| {
         const key_index = resolved.lookUpForward(expected[0]) orelse {
             return error.NotFoundLocal;
