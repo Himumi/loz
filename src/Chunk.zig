@@ -1,6 +1,14 @@
 pub const OpCode = enum(u8) {
     constant,
     constant_long,
+
+    add,
+    subtract,
+    multiply,
+    divide,
+
+    negate,
+
     @"return",
     _,
 
@@ -8,6 +16,14 @@ pub const OpCode = enum(u8) {
         return switch (self) {
             .constant => "CONSTANT",
             .constant_long => "CONSTANT_LONG",
+
+            .add => "ADD",
+            .subtract => "SUBTRACT",
+            .multiply => "MULTIPLY",
+            .divide => "DIVIDE",
+
+            .negate => "NEGATE",
+
             .@"return" => "RETURN",
             _ => "UNKNOWN",
         };
@@ -20,7 +36,7 @@ codes: ArrayList(u8),
 constants: ArrayList(Value),
 lines: ArrayList(Line),
 
-const Value = f64;
+pub const Value = f64;
 const Line = struct {
     count: usize,
     line: usize,
@@ -57,7 +73,7 @@ pub fn writeLiteral(
     try self.lines.append(gpa, .{ .count = 1, .line = line });
 }
 
-pub fn writeCode(
+pub fn writeChunk(
     self: *Chunk,
     gpa: Allocator,
     code: OpCode,
@@ -76,12 +92,12 @@ pub fn writeConstant(
         const value_24: u24 = @truncate(value_index);
         const bytes: [3]u8 = @bitCast(value_24);
 
-        try self.writeCode(gpa, .constant_long, line);
+        try self.writeChunk(gpa, .constant_long, line);
         for (bytes) |byte| {
             try self.writeLiteral(gpa, byte, line);
         }
     } else {
-        try self.writeCode(gpa, .constant, line);
+        try self.writeChunk(gpa, .constant, line);
         try self.writeLiteral(gpa, @intCast(value_index), line);
     }
 }
@@ -100,7 +116,7 @@ pub fn disassemble(self: Chunk, writer: *Io.Writer, name: []const u8) Io.Writer.
     }
 }
 
-fn disassembleInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !usize {
+pub fn disassembleInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !usize {
     try writer.print("{d:0>4} ", .{offset});
     try self.printLine(writer, offset);
 
@@ -109,6 +125,14 @@ fn disassembleInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !usize
         .@"return" => try simpleInstruction(writer, OpCode.@"return".toString(), offset),
         .constant => try self.constantInstruction(writer, offset),
         .constant_long => try self.constantLongInstruction(writer, offset),
+
+        .add => try simpleInstruction(writer, OpCode.add.toString(), offset),
+        .subtract => try simpleInstruction(writer, OpCode.subtract.toString(), offset),
+        .multiply => try simpleInstruction(writer, OpCode.multiply.toString(), offset),
+        .divide => try simpleInstruction(writer, OpCode.divide.toString(), offset),
+
+        .negate => try simpleInstruction(writer, OpCode.negate.toString(), offset),
+
         _ => {
             try writer.print("Unknown opcode {any}\n", .{instruction});
             return offset + 1;
@@ -134,7 +158,7 @@ fn constantLongInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !usiz
     return offset + 4;
 }
 
-fn getConstantLong(self: Chunk, offset: usize) u32 {
+pub fn getConstantLong(self: Chunk, offset: usize) u32 {
     const bytes = self.codes.items[offset .. offset + 3];
     return mem.readInt(u24, bytes[0..3], .big);
 }
@@ -181,7 +205,7 @@ test "Chunk" {
     try chunk.constants.appendSlice(gpa, &values);
 
     try chunk.writeConstant(gpa, chunk.constants.items.len - 1, 123);
-    try chunk.writeCode(gpa, .@"return", 123);
+    try chunk.writeChunk(gpa, .@"return", 123);
 
     var writer: Io.Writer.Allocating = .init(gpa);
     defer writer.deinit();
