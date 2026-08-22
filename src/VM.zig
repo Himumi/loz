@@ -73,9 +73,10 @@ pub fn deinit(self: *VM, gpa: Allocator) void {
     self.stack.deinit(gpa);
 }
 
-pub fn interpret(self: *VM, chunk: *Chunk) Error!void {
+pub fn interpret(self: *VM, source: [:0]const u8) Error!void {
     // It borrows the memory.
-    self.chunk = chunk;
+    try compiler.compile(source);
+    self.chunk = undefined;
     self.ip = 0;
 }
 
@@ -164,45 +165,6 @@ fn dumpInstruction(self: *VM, writer: *Io.Writer, offset: usize) !void {
     try self.chunk.disassembleInstruction(writer, offset);
 }
 
-test "VM" {
-    const gpa = testing.allocator;
-
-    var chunk: Chunk = .empty;
-    defer chunk.deinit(gpa);
-
-    var constant_index = try chunk.addValue(gpa, 1.2);
-    try chunk.writeConstant(gpa, constant_index, 123);
-
-    constant_index = try chunk.addValue(gpa, 3.4);
-    try chunk.writeConstant(gpa, constant_index, 123);
-
-    try chunk.writeChunk(gpa, .add, 123);
-
-    constant_index = try chunk.addValue(gpa, 5.6);
-    try chunk.writeConstant(gpa, constant_index, 123);
-
-    try chunk.writeChunk(gpa, .divide, 123);
-
-    try chunk.writeChunk(gpa, .negate, 123);
-    try chunk.writeChunk(gpa, .@"return", 123);
-
-    try chunk.writeChunk(gpa, .@"return", 123);
-
-    var writer: Io.Writer.Allocating = .init(gpa);
-    defer writer.deinit();
-
-    var ctx: Context = .init(undefined, .{ .out = &writer.writer });
-
-    var vm: VM = .empty;
-    defer vm.deinit(gpa);
-
-    try vm.interpret(&chunk);
-    try vm.run(gpa, &ctx);
-
-    // Uncomment to print debugging.
-    // std.debug.print("{s}", .{writer.written()});
-}
-
 // A Vitual Machine Challenges
 //
 // 1. What bytecode instruction sequences would you generate for the following expressions:
@@ -221,3 +183,4 @@ const Io = std.Io;
 
 const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
+const compiler = @import("compiler.zig");
