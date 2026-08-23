@@ -73,11 +73,15 @@ pub fn deinit(self: *VM, gpa: Allocator) void {
     self.stack.deinit(gpa);
 }
 
-pub fn interpret(self: *VM, source: [:0]const u8) Error!void {
+pub fn interpret(self: *VM, gpa: Allocator, ctx: *Context, source: [:0]const u8) !void {
     // It borrows the memory.
-    try compiler.compile(source);
-    self.chunk = undefined;
+    var chunk = try compiler.compile(gpa, ctx, source);
+    defer chunk.deinit(gpa);
+
+    self.chunk = &chunk;
     self.ip = 0;
+
+    try self.run(gpa, ctx);
 }
 
 pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
@@ -113,7 +117,7 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
 
             .@"return" => {
                 if (self.stack.pop()) |value| {
-                    return try ctx.stream.out.print("{}\n", .{value});
+                    return try ctx.stream.out.print("{}", .{value});
                 }
                 return VMError.runtime_error;
             },
