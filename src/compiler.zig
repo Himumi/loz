@@ -3,9 +3,12 @@ pub fn compile(gpa: Allocator, ctx: *Context, source: [:0]const u8) CompilerErro
     return compiler.compile(gpa, ctx);
 }
 
-const CompilerError = Allocator.Error || Io.Writer.Error || fmt.ParseFloatError;
+pub const CompilerError =
+    Compiler.Error ||
+    Allocator.Error ||
+    Io.Writer.Error;
 
-const Compiler = struct {
+pub const Compiler = struct {
     source: [:0]const u8,
     /// Borrow from the caller.
     ctx: *Context,
@@ -18,6 +21,15 @@ const Compiler = struct {
 
     had_error: bool,
     panic_mode: bool,
+
+    // TODO: Need a better error message.
+    pub const Error = error{
+        InvalidToken,
+        ExpectedExpression,
+        ExpectedLeftParen,
+        TooManyConstants,
+        InvalidCharacter,
+    };
 
     pub const Precedence = enum(u8) {
         none,
@@ -44,7 +56,14 @@ const Compiler = struct {
             .precedence = .none,
         };
 
-        pub const Kind = enum { null, number, group, unary, binary };
+        pub const Kind = enum {
+            null,
+            number,
+            group,
+            unary,
+            binary,
+            literal,
+        };
     };
 
     const RuleList = std.EnumArray(Token.Tag, Rule);
@@ -103,7 +122,8 @@ const Compiler = struct {
 
         const prefix_rule = rules.get(self.previous.tag).prefix;
         if (prefix_rule == .null) {
-            return try self.report("Expect Expression.");
+            try self.errorAt(self.previous, "Expect Expression.");
+            return error.ExpectedExpression;
         }
 
         try self.parseRule(gpa, prefix_rule);
@@ -122,6 +142,7 @@ const Compiler = struct {
 
     fn parseRule(self: *Compiler, gpa: Allocator, rule: Rule.Kind) CompilerError!void {
         return switch (rule) {
+            .literal => try self.literal(gpa),
             .number => try self.number(gpa),
             .group => try self.grouping(gpa),
             .binary => try self.binary(gpa),
@@ -131,8 +152,8 @@ const Compiler = struct {
     }
 
     fn number(self: *Compiler, gpa: Allocator) CompilerError!void {
-        const value = try fmt.parseFloat(Value, self.previous.lexeme(self.source));
-        try self.emitConstant(gpa, value);
+        const value = try fmt.parseFloat(f64, self.previous.lexeme(self.source));
+        try self.emitConstant(gpa, .{ .number = value });
     }
 
     fn grouping(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -146,7 +167,8 @@ const Compiler = struct {
         try self.parsePrecedence(gpa, .unary);
 
         switch (operator_tag) {
-            .minus => try self.emitByte(gpa, .negate),
+            .minus => try self.emitByte(gpa, .op_negate),
+            .bang => try self.emitByte(gpa, .op_not),
             else => return,
         }
     }
@@ -162,11 +184,35 @@ const Compiler = struct {
         try self.parsePrecedence(gpa, next_precedence);
 
         switch (operator_tag) {
-            .plus => try self.emitByte(gpa, .add),
-            .minus => try self.emitByte(gpa, .subtract),
-            .star => try self.emitByte(gpa, .multiply),
-            .slash => try self.emitByte(gpa, .divide),
-            else => return,
+            .bang_equal => {
+                try self.emitByte(gpa, .op_equal);
+                try self.emitByte(gpa, .op_not);
+            },
+            .equal_equal => try self.emitByte(gpa, .op_equal),
+            .greater => try self.emitByte(gpa, .op_greater),
+            .greater_equal => {
+                try self.emitByte(gpa, .op_less);
+                try self.emitByte(gpa, .op_not);
+            },
+            .less => try self.emitByte(gpa, .op_less),
+            .less_equal => {
+                try self.emitByte(gpa, .op_greater);
+                try self.emitByte(gpa, .op_not);
+            },
+            .plus => try self.emitByte(gpa, .op_add),
+            .minus => try self.emitByte(gpa, .op_subtract),
+            .star => try self.emitByte(gpa, .op_multiply),
+            .slash => try self.emitByte(gpa, .op_divide),
+            else => {},
+        }
+    }
+
+    fn literal(self: *Compiler, gpa: Allocator) CompilerError!void {
+        switch (self.previous.tag) {
+            .keyword_false => try self.emitByte(gpa, .op_false),
+            .keyword_nil => try self.emitByte(gpa, .op_nil),
+            .keyword_true => try self.emitByte(gpa, .op_true),
+            else => {},
         }
     }
 
@@ -200,10 +246,6 @@ const Compiler = struct {
         self.had_error = true;
     }
 
-    fn report(self: Compiler, message: []const u8) Io.Writer.Error!void {
-        try self.ctx.stream.err.print("{s}\n", .{message});
-    }
-
     fn consume(self: *Compiler, tag: Token.Tag, message: []const u8) Io.Writer.Error!void {
         if (self.current.tag == tag) {
             return try self.advance();
@@ -211,7 +253,7 @@ const Compiler = struct {
         try self.errorAt(self.current, message);
     }
 
-    fn emitByte(self: *Compiler, gpa: Allocator, code: Chunk.OpCode) Allocator.Error!void {
+    fn emitByte(self: *Compiler, gpa: Allocator, code: Chunk.Code) Allocator.Error!void {
         try self.chunk.writeChunk(gpa, code, self.previous.line);
     }
 
@@ -225,7 +267,7 @@ const Compiler = struct {
     }
 
     fn emitReturn(self: *Compiler, gpa: Allocator) Allocator.Error!void {
-        try self.emitByte(gpa, .@"return");
+        try self.emitByte(gpa, .op_return);
     }
 
     fn endCompiler(self: *Compiler, gpa: Allocator) Allocator.Error!void {
@@ -239,7 +281,7 @@ const Compiler = struct {
     ) (Allocator.Error || Io.Writer.Error)!u32 {
         const index = try self.chunk.addValue(gpa, value);
         if (index > 256) {
-            try self.report("Too many constants in one chunk");
+            try self.errorAt(self.previous, "Too many constants in one chunk");
             return 0;
         }
         return index;
@@ -276,12 +318,81 @@ const Compiler = struct {
             .infix = .null,
             .precedence = .none,
         },
+        .keyword_nil = .{
+            .prefix = .literal,
+            .infix = .null,
+            .precedence = .none,
+        },
+        .keyword_false = .{
+            .prefix = .literal,
+            .infix = .null,
+            .precedence = .none,
+        },
+        .keyword_true = .{
+            .prefix = .literal,
+            .infix = .null,
+            .precedence = .none,
+        },
+        .bang = .{
+            .prefix = .unary,
+            .infix = .null,
+            .precedence = .none,
+        },
+        .bang_equal = .{
+            .prefix = .null,
+            .infix = .binary,
+            .precedence = .equality,
+        },
+        .equal_equal = .{
+            .prefix = .null,
+            .infix = .binary,
+            .precedence = .equality,
+        },
+        .greater = .{
+            .prefix = .null,
+            .infix = .binary,
+            .precedence = .comparison,
+        },
+        .greater_equal = .{
+            .prefix = .null,
+            .infix = .binary,
+            .precedence = .comparison,
+        },
+        .less = .{
+            .prefix = .null,
+            .infix = .binary,
+            .precedence = .comparison,
+        },
+        .less_equal = .{
+            .prefix = .null,
+            .infix = .binary,
+            .precedence = .comparison,
+        },
     });
 };
 
 test "compiler" {
+    try testCompile("(1 + 2) * 3", "9");
+    try testCompile("1 + 2 * 3", "7");
+    try testCompile("10 - 5 / 1", "5");
+    try testCompile("true", "true");
+    try testCompile("false", "false");
+    try testCompile("nil", "nil");
+    try testCompile("!true", "false");
+    try testCompile("!false", "true");
+    try testCompile("!nil", "true");
+    try testCompile("!10", "false");
+    try testCompile("10 == 10", "true");
+    try testCompile("10 != 10", "false");
+    try testCompile("10 < 10", "false");
+    try testCompile("10 <= 10", "true");
+    try testCompile("10 > 10", "false");
+    try testCompile("10 >= 10", "true");
+    try testCompile("!(5 - 4 > 3 * 2 == !nil)", "true");
+}
+
+fn testCompile(source: [:0]const u8, expected: []const u8) !void {
     const gpa = testing.allocator;
-    const source = "1 + 2 * 3";
 
     var stream: Io.Writer.Allocating = .init(gpa);
     defer stream.deinit();
@@ -292,46 +403,6 @@ test "compiler" {
     defer vm.deinit(gpa);
 
     try vm.interpret(gpa, &ctx, source);
-    try testing.expectEqualSlices(u8, "7", stream.written());
-
-    try testCompiler(
-        \\ print 1 + 2;
-        \\
-    ,
-        \\   1 31 'print'
-        \\   | 21 '1'
-        \\   |  7 '+'
-        \\   | 21 '2'
-        \\   |  8 ';'
-        \\   2 39 ''
-        \\
-    );
-}
-
-fn testCompiler(source: [:0]const u8, expected: []const u8) !void {
-    const gpa = testing.allocator;
-
-    var stream: Io.Writer.Allocating = .init(gpa);
-    defer stream.deinit();
-
-    const writer = &stream.writer;
-
-    var scanner: tokenizer.Scanner = .init(source);
-
-    var line: u32 = 0;
-    while (true) {
-        const token = scanner.next();
-        if (line != token.line) {
-            try writer.print("{d:>4} ", .{token.line});
-            line = token.line;
-        } else {
-            try writer.print("   | ", .{});
-        }
-        try writer.print("{d:2} '{s}'\n", .{ token.tag, token.lexeme(source) });
-
-        if (token.tag == .eof) break;
-    }
-
     try testing.expectEqualSlices(u8, expected, stream.written());
 }
 

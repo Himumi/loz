@@ -25,12 +25,24 @@ pub fn Stack(comptime T: type) type {
             return null;
         }
 
+        pub fn len(self: Self) usize {
+            return self.store.items.len;
+        }
+
         pub fn push(self: *Self, gpa: Allocator, value: T) Allocator.Error!void {
             try self.store.append(gpa, value);
         }
 
         pub fn pop(self: *Self) ?T {
             return self.store.pop();
+        }
+
+        pub fn peek(self: Self) T {
+            return self.store.items[self.store.items.len - 1];
+        }
+
+        pub fn set(self: *Self, index: usize, value: Chunk.Value) void {
+            self.store.items[index] = value;
         }
 
         pub fn slice(self: Self) []T {
@@ -42,7 +54,7 @@ pub fn Stack(comptime T: type) type {
     };
 }
 
-const VMError = Error || Io.Writer.Error;
+const VMError = Error || Io.Writer.Error || Allocator.Error;
 
 const VM = @This();
 // It borrows the memory.
@@ -50,9 +62,14 @@ chunk: *Chunk,
 ip: usize,
 stack: Stack(Chunk.Value),
 
-pub const Error = error{
-    compile_error,
-    runtime_error,
+pub const Error = (RuntimeError || Compiler.Error);
+
+pub const RuntimeError = error{
+    EmptyStack,
+    InvalidOperation,
+    InvalidBinaryOperation,
+    UndefinedValue,
+    OperandMustBeNumber,
 };
 
 pub const empty: VM = .{
@@ -90,38 +107,44 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
         // try self.dumpStack(ctx.stream.err);
         // try self.dumpInstruction(ctx.stream.err, self.ip);
 
-        const op_code: Chunk.OpCode = @enumFromInt(self.readByte());
-        switch (op_code) {
-            .constant => {
-                const constant = self.readConstant();
-                self.stack.push(gpa, constant) catch return VMError.runtime_error;
+        const code: Chunk.Code = @enumFromInt(self.readByte());
+        switch (code) {
+            .op_constant => try self.stack.push(gpa, self.readConstant()),
+            .op_constant_long => try self.stack.push(gpa, self.readConstantLong()),
+            .op_nil => try self.stack.push(gpa, .nil),
+            .op_true => try self.stack.push(gpa, .{ .boolean = true }),
+            .op_false => try self.stack.push(gpa, .{ .boolean = false }),
+            .op_equal => {
+                const b = self.stack.store.pop() orelse return error.UndefinedValue;
+                const a = self.stack.store.pop() orelse return error.UndefinedValue;
+                try self.stack.push(gpa, .{ .boolean = a.isEqual(b) });
             },
-            .constant_long => {
-                const constant = self.readConstantLong();
-                self.stack.push(gpa, constant) catch return VMError.runtime_error;
+            .op_greater => try self.binaryOperation(gpa, ctx, .op_greater),
+            .op_less => try self.binaryOperation(gpa, ctx, .op_less),
+            .op_add => try self.binaryOperation(gpa, ctx, .op_add),
+            .op_subtract => try self.binaryOperation(gpa, ctx, .op_subtract),
+            .op_multiply => try self.binaryOperation(gpa, ctx, .op_multiply),
+            .op_divide => try self.binaryOperation(gpa, ctx, .op_divide),
+            .op_not => {
+                if (self.stack.len() == 0) return error.UndefinedValue;
+                const last = self.stack.peek();
+                self.stack.set(self.stack.len() - 1, .{ .boolean = last.isFalsey() });
             },
+            .op_negate => {
+                if (self.stack.len() == 0) return error.UndefinedValue;
 
-            .add => self.binaryOperation(gpa, .add) catch return Error.runtime_error,
-            .subtract => self.binaryOperation(gpa, .subtract) catch return Error.runtime_error,
-            .multiply => self.binaryOperation(gpa, .multiply) catch return Error.runtime_error,
-            .divide => self.binaryOperation(gpa, .divide) catch return Error.runtime_error,
-
-            .negate => {
-                if (self.stack.store.items.len > 0) {
-                    const last = self.stack.store.items.len - 1;
-                    self.stack.store.items[last] = -(self.stack.store.items[last]);
-                } else {
-                    return VMError.runtime_error;
+                const last = self.stack.peek();
+                if (last != .number) {
+                    try self.runtimeError(ctx.stream.err, "Operand must be a number", .{});
+                    return error.OperandMustBeNumber;
                 }
+                self.stack.set(self.stack.len() - 1, .{ .number = -(last.number) });
             },
-
-            .@"return" => {
-                if (self.stack.pop()) |value| {
-                    return try ctx.stream.out.print("{}", .{value});
-                }
-                return VMError.runtime_error;
+            .op_return => {
+                const last = self.stack.pop() orelse return error.UndefinedValue;
+                return try last.print(ctx.stream.out);
             },
-            _ => return Error.runtime_error,
+            else => return error.InvalidOperation,
         }
     }
 }
@@ -143,17 +166,32 @@ fn readConstantLong(self: *VM) Chunk.Value {
     return self.chunk.constants.items[@intCast(index)];
 }
 
-fn binaryOperation(self: *VM, gpa: Allocator, code: Chunk.OpCode) !void {
+fn binaryOperation(self: *VM, gpa: Allocator, ctx: *Context, code: Chunk.Code) !void {
     const b = self.stack.pop() orelse return error.UndefinedValue;
-    const a = self.stack.pop() orelse return error.UndefinedValue;
-
-    switch (code) {
-        .add => try self.stack.push(gpa, a + b),
-        .subtract => try self.stack.push(gpa, a - b),
-        .multiply => try self.stack.push(gpa, a * b),
-        .divide => try self.stack.push(gpa, a / b),
-        else => return error.InvalidBinaryOperation,
+    if (!b.isNumber()) {
+        try self.runtimeError(ctx.stream.err, "Operand must be a number.", .{});
+        return error.OperandMustBeNumber;
     }
+
+    const a = self.stack.pop() orelse return error.UndefinedValue;
+    if (!a.isNumber()) {
+        try self.runtimeError(ctx.stream.err, "Operand must be a number.", .{});
+        return error.OperandMustBeNumber;
+    }
+
+    const result: Chunk.Value = switch (code) {
+        .op_add => .{ .number = a.number + b.number },
+        .op_subtract => .{ .number = a.number - b.number },
+        .op_multiply => .{ .number = a.number * b.number },
+        .op_divide => .{ .number = a.number / b.number },
+        .op_greater => .{ .boolean = a.number > b.number },
+        .op_less => .{ .boolean = a.number < b.number },
+        else => {
+            try self.runtimeError(ctx.stream.err, "Invalid Binary Operation", .{});
+            return error.InvalidBinaryOperation;
+        },
+    };
+    try self.stack.push(gpa, result);
 }
 
 // For debugging purpose.
@@ -167,6 +205,14 @@ fn dumpStack(self: *VM, writer: *Io.Writer) !void {
 
 fn dumpInstruction(self: *VM, writer: *Io.Writer, offset: usize) !void {
     try self.chunk.disassembleInstruction(writer, offset);
+}
+
+fn runtimeError(self: *VM, writer: *Io.Writer, comptime fmt: []const u8, args: anytype) !void {
+    try writer.print(fmt, args);
+    try writer.writeByte('\n');
+
+    const line = self.chunk.getLine(self.ip) orelse 0;
+    try writer.print("[line {}] in script.\n", .{line});
 }
 
 // A Vitual Machine Challenges
@@ -188,3 +234,4 @@ const Io = std.Io;
 const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
 const compiler = @import("compiler.zig");
+const Compiler = compiler.Compiler;
