@@ -506,6 +506,25 @@ pub const Scanner = struct {
     }
 };
 
+/// For debugging purpose
+pub fn dump(source: [:0]const u8) !void {
+    var scanner: Scanner = .init(source);
+
+    var line: u32 = 0;
+    while (true) {
+        const token = scanner.next();
+        if (line != token.line) {
+            try std.debug.print("{d:>4} ", .{token.line});
+            line = token.line;
+        } else {
+            try std.debug.print("   | ", .{});
+        }
+        try std.debug.print("{d:2} '{s}'\n", .{ token.tag, token.lexeme(source) });
+
+        if (token.tag == .eof) break;
+    }
+}
+
 test "succeeds scanner" {
     try testScanner("(", 2, "( EOF");
     try testScanner(")", 2, ") EOF");
