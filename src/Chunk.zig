@@ -1,74 +1,3 @@
-pub const Value = union(enum) {
-    number: f64,
-    boolean: bool,
-    nil: void,
-
-    pub fn isNumber(self: Value) bool {
-        return self == .number;
-    }
-
-    pub fn isBoolean(self: Value) bool {
-        return self == .boolean;
-    }
-
-    pub fn isNil(self: Value) bool {
-        return self == .nil;
-    }
-
-    pub fn isSame(self: Value, target: Value) bool {
-        if (self.isNumber() and target.isNumber()) return true;
-        if (self.isNil() and target.isNil()) return true;
-        if (self.isBoolean() and target.isBoolean()) return true;
-
-        return false;
-    }
-
-    pub fn isEqual(self: Value, target: Value) bool {
-        if (!self.isSame(target)) return false;
-
-        return switch (self) {
-            .nil => return true,
-            .boolean => |boolean| boolean == target.boolean,
-            .number => |number| number == target.number,
-        };
-    }
-
-    pub fn print(self: Value, writer: *Io.Writer) Io.Writer.Error!void {
-        switch (self) {
-            .number => |number| try writer.print("{}", .{number}),
-            .boolean => |boolean| try writer.print("{}", .{boolean}),
-            .nil => try writer.writeAll("nil"),
-        }
-    }
-
-    fn dumpInstruction(
-        self: Value,
-        writer: *Io.Writer,
-        name: []const u8,
-        constant: u32,
-    ) Io.Writer.Error!void {
-        switch (self) {
-            .number => |number| {
-                try writer.print("{s:<16} {d:>4} '{}'\n", .{ name, constant, number });
-            },
-            .boolean => |boolean| {
-                try writer.print("{s:<16} {d:>4} '{}'\n", .{ name, constant, boolean });
-            },
-            .nil => {
-                try writer.print("{s:<16} {d:>4} 'nil'\n", .{ name, constant });
-            },
-        }
-    }
-
-    pub fn isFalsey(self: Value) bool {
-        return switch (self) {
-            .nil => true,
-            .boolean => |boolean| !boolean,
-            else => false,
-        };
-    }
-};
-
 pub const Code = enum(u8) {
     op_constant,
     op_constant_long,
@@ -136,7 +65,12 @@ pub const empty: Chunk = .{
 
 pub fn deinit(self: *Chunk, gpa: Allocator) void {
     self.codes.deinit(gpa);
+
+    for (self.constants.items) |constant| {
+        constant.deinit(gpa);
+    }
     self.constants.deinit(gpa);
+
     self.lines.deinit(gpa);
 }
 
@@ -324,3 +258,5 @@ const testing = std.testing;
 const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
 const Io = std.Io;
+
+const Value = @import("values.zig").Value;

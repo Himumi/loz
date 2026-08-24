@@ -1,66 +1,12 @@
-pub fn Stack(comptime T: type) type {
-    return struct {
-        store: ArrayList(T),
-
-        const Self = @This();
-
-        pub fn initCapacity(gpa: Allocator, capacity: usize) Allocator.Error!Self {
-            return .{ .store = try .initCapacity(gpa, capacity) };
-        }
-
-        pub const empty: Self = .{ .store = .empty };
-
-        pub fn deinit(self: *Self, gpa: Allocator) void {
-            self.store.deinit(gpa);
-        }
-
-        pub fn reset(self: *Self) void {
-            self.store.items.len = 0;
-        }
-
-        pub fn last(self: Self) ?usize {
-            if (self.store.items.len > 0) {
-                return self.store.items.len - 1;
-            }
-            return null;
-        }
-
-        pub fn len(self: Self) usize {
-            return self.store.items.len;
-        }
-
-        pub fn push(self: *Self, gpa: Allocator, value: T) Allocator.Error!void {
-            try self.store.append(gpa, value);
-        }
-
-        pub fn pop(self: *Self) ?T {
-            return self.store.pop();
-        }
-
-        pub fn peek(self: Self) T {
-            return self.store.items[self.store.items.len - 1];
-        }
-
-        pub fn set(self: *Self, index: usize, value: Chunk.Value) void {
-            self.store.items[index] = value;
-        }
-
-        pub fn slice(self: Self) []T {
-            if (self.last()) |index| {
-                return self.store[0..index];
-            }
-            return &.{};
-        }
-    };
-}
-
 const VMError = Error || Io.Writer.Error || Allocator.Error;
 
 const VM = @This();
 // It borrows the memory.
 chunk: *Chunk,
 ip: usize,
-stack: Stack(Chunk.Value),
+stack: Stack,
+// A linked list for runtime's Objects.
+objects: ?*Obj,
 
 pub const Error = (RuntimeError || Compiler.Error);
 
@@ -76,6 +22,7 @@ pub const empty: VM = .{
     .chunk = undefined,
     .ip = 0,
     .stack = .empty,
+    .objects = null,
 };
 
 pub fn initCapacity(gpa: Allocator, capacity: usize) Allocator.Error!VM {
@@ -83,11 +30,22 @@ pub fn initCapacity(gpa: Allocator, capacity: usize) Allocator.Error!VM {
         .chunk = undefined,
         .ip = 0,
         .stack = try .initCapacity(gpa, capacity),
+        .objects = null,
     };
 }
 
 pub fn deinit(self: *VM, gpa: Allocator) void {
     self.stack.deinit(gpa);
+    self.freeObjects(gpa);
+}
+
+fn freeObjects(self: *VM, gpa: Allocator) void {
+    var obj = self.objects;
+    while (obj) |object| {
+        const next = object.next;
+        object.destroy(gpa);
+        obj = next;
+    }
 }
 
 pub fn interpret(self: *VM, gpa: Allocator, ctx: *Context, source: [:0]const u8) !void {
@@ -105,7 +63,7 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
     while (self.ip < self.chunk.codes.items.len) {
         // Uncomment for debugging.
         // try self.dumpStack(ctx.stream.err);
-        // try self.dumpInstruction(ctx.stream.err, self.ip);
+        // try self.chunk.disassembleInstruction(ctx.stream.err, self.ip);
 
         const code: Chunk.Code = @enumFromInt(self.readByte());
         switch (code) {
@@ -121,7 +79,18 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
             },
             .op_greater => try self.binaryOperation(gpa, ctx, .op_greater),
             .op_less => try self.binaryOperation(gpa, ctx, .op_less),
-            .op_add => try self.binaryOperation(gpa, ctx, .op_add),
+            .op_add => {
+                const b = self.stack.get(self.stack.len() - 1) orelse return error.UndefinedValue;
+                const a = self.stack.get(self.stack.len() - 2) orelse return error.UndefinedValue;
+                if (b.isString() and a.isString()) {
+                    try self.concatenate(gpa);
+                } else if (b.isNumber() and a.isNumber()) {
+                    try self.binaryOperation(gpa, ctx, .op_add);
+                } else {
+                    try self.runtimeError(ctx.stream.err, "Invalid Operands Type.", .{});
+                    return error.InvalidBinaryOperation;
+                }
+            },
             .op_subtract => try self.binaryOperation(gpa, ctx, .op_subtract),
             .op_multiply => try self.binaryOperation(gpa, ctx, .op_multiply),
             .op_divide => try self.binaryOperation(gpa, ctx, .op_divide),
@@ -155,12 +124,12 @@ fn readByte(self: *VM) u8 {
     return ip;
 }
 
-fn readConstant(self: *VM) Chunk.Value {
+fn readConstant(self: *VM) Value {
     const index: usize = @intCast(self.readByte());
     return self.chunk.constants.items[index];
 }
 
-fn readConstantLong(self: *VM) Chunk.Value {
+fn readConstantLong(self: *VM) Value {
     const index = self.chunk.getConstantLong(self.ip);
     self.ip += 3;
     return self.chunk.constants.items[@intCast(index)];
@@ -179,7 +148,7 @@ fn binaryOperation(self: *VM, gpa: Allocator, ctx: *Context, code: Chunk.Code) !
         return error.OperandMustBeNumber;
     }
 
-    const result: Chunk.Value = switch (code) {
+    const result: Value = switch (code) {
         .op_add => .{ .number = a.number + b.number },
         .op_subtract => .{ .number = a.number - b.number },
         .op_multiply => .{ .number = a.number * b.number },
@@ -194,17 +163,31 @@ fn binaryOperation(self: *VM, gpa: Allocator, ctx: *Context, code: Chunk.Code) !
     try self.stack.push(gpa, result);
 }
 
-// For debugging purpose.
-fn dumpStack(self: *VM, writer: *Io.Writer) !void {
-    try writer.writeAll("          ");
-    for (self.stack.slice()) |value| {
-        try writer.print("[{}]", .{value});
-    }
-    try writer.writeByte('\n');
-}
+fn concatenate(self: *VM, gpa: Allocator) !void {
+    // It does not own the ownership.
+    const b = self.stack.pop() orelse return error.UndefinedValue;
+    // It does not own the ownership.
+    const a = self.stack.pop() orelse return error.UndefinedValue;
 
-fn dumpInstruction(self: *VM, writer: *Io.Writer, offset: usize) !void {
-    try self.chunk.disassembleInstruction(writer, offset);
+    if (b.isString() and a.isString()) {
+        const concat = try mem.concat(gpa, u8, &.{
+            a.object.data.string,
+            b.object.data.string,
+        });
+        errdefer gpa.free(concat);
+
+        const new_str = try Obj.create(gpa, .{
+            .data = .{ .string = concat },
+            .next = self.objects,
+        });
+        errdefer new_str.destroy(gpa);
+
+        // Add the new object to VM's Objects to track the memory.
+        self.objects = new_str;
+        try self.stack.push(gpa, .{ .object = new_str });
+    } else {
+        return error.InvalidBinaryOperation;
+    }
 }
 
 fn runtimeError(self: *VM, writer: *Io.Writer, comptime fmt: []const u8, args: anytype) !void {
@@ -231,7 +214,11 @@ const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
 const Io = std.Io;
 
+const compiler = @import("compiler.zig");
+const values = @import("values.zig");
 const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
-const compiler = @import("compiler.zig");
+const Stack = @import("Stack.zig");
 const Compiler = compiler.Compiler;
+const Obj = values.Obj;
+const Value = values.Value;

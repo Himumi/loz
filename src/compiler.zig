@@ -59,6 +59,7 @@ pub const Compiler = struct {
         pub const Kind = enum {
             null,
             number,
+            string,
             group,
             unary,
             binary,
@@ -144,6 +145,7 @@ pub const Compiler = struct {
         return switch (rule) {
             .literal => try self.literal(gpa),
             .number => try self.number(gpa),
+            .string => try self.string(gpa),
             .group => try self.grouping(gpa),
             .binary => try self.binary(gpa),
             .unary => try self.unary(gpa),
@@ -154,6 +156,18 @@ pub const Compiler = struct {
     fn number(self: *Compiler, gpa: Allocator) CompilerError!void {
         const value = try fmt.parseFloat(f64, self.previous.lexeme(self.source));
         try self.emitConstant(gpa, .{ .number = value });
+    }
+
+    fn string(self: *Compiler, gpa: Allocator) CompilerError!void {
+        const lexeme = self.previous.lexeme(self.source);
+
+        const str = try gpa.dupe(u8, lexeme[1 .. lexeme.len - 1]);
+        errdefer gpa.free(str);
+
+        const obj = try Obj.create(gpa, .{ .data = .{ .string = str } });
+        errdefer obj.destroy(gpa);
+
+        try self.emitConstant(gpa, .{ .object = obj });
     }
 
     fn grouping(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -318,6 +332,11 @@ pub const Compiler = struct {
             .infix = .null,
             .precedence = .none,
         },
+        .string = .{
+            .prefix = .string,
+            .infix = .null,
+            .precedence = .none,
+        },
         .keyword_nil = .{
             .prefix = .literal,
             .infix = .null,
@@ -389,6 +408,13 @@ test "compiler" {
     try testCompile("10 > 10", "false");
     try testCompile("10 >= 10", "true");
     try testCompile("!(5 - 4 > 3 * 2 == !nil)", "true");
+    try testCompile(
+        \\ "hello"
+    , "hello");
+
+    try testCompile(
+    \\ "hello, " + "world!"
+    , "hello, world!");
 }
 
 fn testCompile(source: [:0]const u8, expected: []const u8) !void {
@@ -415,9 +441,11 @@ const Allocator = mem.Allocator;
 const Io = std.Io;
 
 const tokenizer = @import("tokenizer.zig");
+const values = @import("values.zig");
 const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
 const VM = @import("VM.zig");
+const Obj = values.Obj;
+const Value = values.Value;
 const Scanner = tokenizer.Scanner;
 const Token = tokenizer.Token;
-const Value = Chunk.Value;
