@@ -45,10 +45,13 @@ pub fn deinit(self: *VM, gpa: Allocator) void {
 }
 
 pub fn interpret(self: *VM, gpa: Allocator, ctx: *Context, source: [:0]const u8) !void {
-    // It borrows the memory.
-    var chunk = try compiler.compile(gpa, ctx, source);
-    defer chunk.deinit(gpa);
+    var arena_allocator: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_allocator.deinit();
 
+    // Chunk is a constant memory after compilation.
+    var chunk = try compiler.compile(arena_allocator.allocator(), ctx, source);
+
+    // It borrows the memory.
     self.chunk = &chunk;
     self.ip = 0;
 
