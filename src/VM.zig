@@ -176,11 +176,14 @@ fn concatenate(self: *VM, gpa: Allocator) !void {
         });
         errdefer gpa.free(concat);
 
-        const new_str = try Obj.create(gpa, .{
+        // NOTE: Use imperative way for readability.
+        const new_str = try gpa.create(Obj);
+        errdefer gpa.destroy(new_str);
+
+        new_str.* = .{
             .kind = .{ .string = concat },
             .next = self.objects,
-        });
-        errdefer new_str.destroy(gpa);
+        };
 
         // Add the new object to VM's Objects to track the memory.
         self.objects = new_str;
