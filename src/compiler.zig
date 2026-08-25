@@ -164,8 +164,11 @@ pub const Compiler = struct {
         const str = try gpa.dupe(u8, lexeme[1 .. lexeme.len - 1]);
         errdefer gpa.free(str);
 
-        const obj = try Obj.create(gpa, .{ .data = .{ .string = str } });
-        errdefer obj.destroy(gpa);
+        // NOTE: Use imperative way for readability.
+        const obj = try gpa.create(Obj);
+        errdefer gpa.destroy(obj);
+
+        obj.* = .{ .data = .{ .string = str } };
 
         try self.emitConstant(gpa, .{ .object = obj });
     }
@@ -413,7 +416,7 @@ test "compiler" {
     , "hello");
 
     try testCompile(
-    \\ "hello, " + "world!"
+        \\ "hello, " + "world!"
     , "hello, world!");
 }
 
