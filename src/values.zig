@@ -78,7 +78,7 @@ pub const Value = union(enum) {
                 try writer.print("{s:<16} {d:>4} 'nil'\n", .{ name, constant });
             },
             .object => |object| {
-                switch (object.*.data) {
+                switch (object.*.kind) {
                     .string => |string| try writer.print(
                         "{s:<16} {d:>4} '{s}'\n",
                         .{ name, constant, string },
@@ -98,10 +98,10 @@ pub const Value = union(enum) {
 };
 
 pub const Obj = struct {
-    data: Data,
+    kind: Kind,
     next: ?*Obj = null,
 
-    const Data = union(enum) {
+    const Kind = union(enum) {
         string: []const u8,
     };
 
@@ -112,14 +112,14 @@ pub const Obj = struct {
     }
 
     pub fn destroy(self: *Obj, gpa: Allocator) void {
-        switch (self.data) {
+        switch (self.kind) {
             .string => |string| gpa.free(string),
         }
         gpa.destroy(self);
     }
 
     pub fn isString(self: Obj) bool {
-        return self.data == .string;
+        return self.kind == .string;
     }
 
     pub fn isSame(self: Obj, target: Obj) bool {
@@ -130,13 +130,13 @@ pub const Obj = struct {
     pub fn isEqual(self: Obj, target: Obj) bool {
         if (!self.isSame(target)) return false;
 
-        return switch (self.data) {
-            .string => |string| mem.eql(u8, string, target.data.string),
+        return switch (self.kind) {
+            .string => |string| mem.eql(u8, string, target.kind.string),
         };
     }
 
     pub fn print(self: Obj, writer: *Io.Writer) Io.Writer.Error!void {
-        switch (self.data) {
+        switch (self.kind) {
             .string => |string| try writer.print("{s}", .{string}),
         }
     }

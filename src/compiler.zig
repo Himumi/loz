@@ -168,7 +168,7 @@ pub const Compiler = struct {
         const obj = try gpa.create(Obj);
         errdefer gpa.destroy(obj);
 
-        obj.* = .{ .data = .{ .string = str } };
+        obj.* = .{ .kind = .{ .string = str } };
 
         try self.emitConstant(gpa, .{ .object = obj });
     }

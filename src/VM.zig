@@ -171,13 +171,13 @@ fn concatenate(self: *VM, gpa: Allocator) !void {
 
     if (b.isString() and a.isString()) {
         const concat = try mem.concat(gpa, u8, &.{
-            a.object.data.string,
-            b.object.data.string,
+            a.object.kind.string,
+            b.object.kind.string,
         });
         errdefer gpa.free(concat);
 
         const new_str = try Obj.create(gpa, .{
-            .data = .{ .string = concat },
+            .kind = .{ .string = concat },
             .next = self.objects,
         });
         errdefer new_str.destroy(gpa);
