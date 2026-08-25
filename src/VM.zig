@@ -6,7 +6,7 @@ chunk: *Chunk,
 ip: usize,
 stack: Stack,
 // A linked list for runtime's Objects.
-objects: ?*Obj,
+objects: ?*Object,
 
 pub const Error = (RuntimeError || Compiler.Error);
 
@@ -36,15 +36,11 @@ pub fn initCapacity(gpa: Allocator, capacity: usize) Allocator.Error!VM {
 
 pub fn deinit(self: *VM, gpa: Allocator) void {
     self.stack.deinit(gpa);
-    self.freeObjects(gpa);
-}
 
-fn freeObjects(self: *VM, gpa: Allocator) void {
-    var obj = self.objects;
-    while (obj) |object| {
-        const next = object.next;
-        object.destroy(gpa);
-        obj = next;
+    var object_ptr = self.objects;
+    while (object_ptr) |object| {
+        object_ptr = object.next;
+        object.deinit(gpa);
     }
 }
 
@@ -170,24 +166,24 @@ fn concatenate(self: *VM, gpa: Allocator) !void {
     const a = self.stack.pop() orelse return error.UndefinedValue;
 
     if (b.isString() and a.isString()) {
-        const concat = try mem.concat(gpa, u8, &.{
-            a.object.kind.string,
-            b.object.kind.string,
-        });
+        const a_str = a.object.getParentPtr(String);
+        const b_str = b.object.getParentPtr(String);
+
+        const concat = try mem.concat(gpa, u8, &.{ a_str.slice(), b_str.slice() });
         errdefer gpa.free(concat);
 
         // NOTE: Use imperative way for readability.
-        const new_str = try gpa.create(Obj);
-        errdefer gpa.destroy(new_str);
+        const string_object = try gpa.create(String);
+        errdefer gpa.destroy(string_object);
 
-        new_str.* = .{
-            .kind = .{ .string = concat },
+        string_object.* = .init(concat, Object{
+            .kind = .string,
             .next = self.objects,
-        };
-
+        });
         // Add the new object to VM's Objects to track the memory.
-        self.objects = new_str;
-        try self.stack.push(gpa, .{ .object = new_str });
+        self.objects = &string_object.head;
+
+        try self.stack.push(gpa, .{ .object = &string_object.head });
     } else {
         return error.InvalidBinaryOperation;
     }
@@ -223,5 +219,6 @@ const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
 const Stack = @import("Stack.zig");
 const Compiler = compiler.Compiler;
-const Obj = values.Obj;
+const Object = values.Object;
+const String = values.String;
 const Value = values.Value;

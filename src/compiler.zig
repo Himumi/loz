@@ -165,12 +165,14 @@ pub const Compiler = struct {
         errdefer gpa.free(str);
 
         // NOTE: Use imperative way for readability.
-        const obj = try gpa.create(Obj);
-        errdefer gpa.destroy(obj);
+        const string_object = try gpa.create(String);
+        errdefer gpa.destroy(string_object);
 
-        obj.* = .{ .kind = .{ .string = str } };
-
-        try self.emitConstant(gpa, .{ .object = obj });
+        string_object.* = .init(str, Object{
+            .kind = .string,
+            .next = null,
+        });
+        try self.emitConstant(gpa, .{ .object = &string_object.head });
     }
 
     fn grouping(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -448,7 +450,8 @@ const values = @import("values.zig");
 const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
 const VM = @import("VM.zig");
-const Obj = values.Obj;
+const Object = values.Object;
+const String = values.String;
 const Value = values.Value;
 const Scanner = tokenizer.Scanner;
 const Token = tokenizer.Token;

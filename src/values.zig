@@ -2,11 +2,11 @@ pub const Value = union(enum) {
     number: f64,
     boolean: bool,
     nil: void,
-    object: *Obj,
+    object: *Object,
 
     pub fn deinit(self: Value, gpa: Allocator) void {
         if (self == .object) {
-            self.object.destroy(gpa);
+            self.object.deinit(gpa);
         }
     }
 
@@ -47,7 +47,7 @@ pub const Value = union(enum) {
             .boolean => |boolean| boolean == target.boolean,
             .number => |number| number == target.number,
             // TODO: Evaluation for Object.
-            .object => |object| object.isEqual(target.object.*),
+            .object => |object| object.isEqual(target.object),
             // else => false,
         };
     }
@@ -79,10 +79,13 @@ pub const Value = union(enum) {
             },
             .object => |object| {
                 switch (object.*.kind) {
-                    .string => |string| try writer.print(
-                        "{s:<16} {d:>4} '{s}'\n",
-                        .{ name, constant, string },
-                    ),
+                    .string => {
+                        const parent_ptr: *String = @fieldParentPtr("head", object);
+                        try writer.print(
+                            "{s:<16} {d:>4} '{s}'\n",
+                            .{ name, constant, parent_ptr.slice() },
+                        );
+                    },
                 }
             },
         }
@@ -97,47 +100,109 @@ pub const Value = union(enum) {
     }
 };
 
-pub const Obj = struct {
+pub const Object = struct {
     kind: Kind,
-    next: ?*Obj = null,
+    next: ?*Object = null,
 
-    const Kind = union(enum) {
-        string: []const u8,
-    };
+    const Kind = enum { string };
 
-    pub fn destroy(self: *Obj, gpa: Allocator) void {
+    pub fn deinit(self: *Object, gpa: Allocator) void {
         switch (self.kind) {
-            .string => |string| gpa.free(string),
+            .string => {
+                const parent_ptr = self.getParentPtr(String);
+                parent_ptr.destroy(gpa);
+            },
         }
-        gpa.destroy(self);
     }
 
-    pub fn isString(self: Obj) bool {
+    pub fn getParentPtr(self: *Object, comptime T: type) *T {
+        const parent_ptr: *T = @fieldParentPtr("head", self);
+        return parent_ptr;
+    }
+
+    pub fn isString(self: Object) bool {
         return self.kind == .string;
     }
 
-    pub fn isSame(self: Obj, target: Obj) bool {
+    pub fn isSame(self: *Object, target: *Object) bool {
         if (self.isString() and target.isString()) return true;
         return false;
     }
 
-    pub fn isEqual(self: Obj, target: Obj) bool {
+    pub fn isEqual(self: *Object, target: *Object) bool {
         if (!self.isSame(target)) return false;
 
         return switch (self.kind) {
-            .string => |string| mem.eql(u8, string, target.kind.string),
+            .string => {
+                const parent_ptr: *String = @fieldParentPtr("head", self);
+                const target_ptr: *String = @fieldParentPtr("head", target);
+                return mem.eql(u8, parent_ptr.slice(), target_ptr.slice());
+            },
         };
     }
 
-    pub fn print(self: Obj, writer: *Io.Writer) Io.Writer.Error!void {
+    pub fn print(self: *Object, writer: *Io.Writer) Io.Writer.Error!void {
         switch (self.kind) {
-            .string => |string| try writer.print("{s}", .{string}),
+            .string => {
+                const parent_ptr: *String = @fieldParentPtr("head", self);
+                try writer.print("{s}", .{parent_ptr.slice()});
+            },
         }
+    }
+};
+
+test "Object" {
+    var str: String = .{
+        .head = .{
+            .kind = .string,
+            .next = null,
+        },
+        .str = "hello world",
+    };
+
+    var str2: String = .{
+        .head = .{
+            .kind = .string,
+            .next = null,
+        },
+        .str = "hello world",
+    };
+
+    const object = &str.head;
+    const target = &str2.head;
+    try testing.expectEqual(true, object.isSame(target));
+    try testing.expectEqual(true, object.isEqual(target));
+}
+
+pub const String = struct {
+    head: Object,
+    str: []const u8,
+
+    pub fn init(str: []const u8, head: Object) String {
+        return .{
+            .head = head,
+            .str = str,
+        };
+    }
+
+    pub fn destroy(self: *String, gpa: Allocator) void {
+        self.deinit(gpa);
+        gpa.destroy(self);
+    }
+
+    pub fn deinit(self: String, gpa: Allocator) void {
+        gpa.free(self.str);
+    }
+
+    // The caller borrows String's str.
+    pub fn slice(self: String) []const u8 {
+        return self.str;
     }
 };
 
 const std = @import("std");
 const mem = std.mem;
+const testing = std.testing;
 
 const Allocator = mem.Allocator;
 const Io = std.Io;
