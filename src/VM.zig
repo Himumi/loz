@@ -176,7 +176,7 @@ fn concatenate(self: *VM, gpa: Allocator) !void {
         const string_object = try gpa.create(String);
         errdefer gpa.destroy(string_object);
 
-        string_object.* = .init(concat, Object{
+        string_object.* = .init(.owned, concat, Object{
             .kind = .string,
             .next = self.objects,
         });

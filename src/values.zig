@@ -157,6 +157,7 @@ test "Object" {
             .kind = .string,
             .next = null,
         },
+        .kind = .@"const",
         .str = "hello world",
     };
 
@@ -165,6 +166,7 @@ test "Object" {
             .kind = .string,
             .next = null,
         },
+        .kind = .@"const",
         .str = "hello world",
     };
 
@@ -176,11 +178,15 @@ test "Object" {
 
 pub const String = struct {
     head: Object,
+    kind: Kind,
     str: []const u8,
 
-    pub fn init(str: []const u8, head: Object) String {
+    const Kind = enum { @"const", owned };
+
+    pub fn init(kind: Kind, str: []const u8, head: Object) String {
         return .{
             .head = head,
+            .kind = kind,
             .str = str,
         };
     }
@@ -191,7 +197,9 @@ pub const String = struct {
     }
 
     pub fn deinit(self: String, gpa: Allocator) void {
-        gpa.free(self.str);
+        if (self.kind == .owned) {
+            gpa.free(self.str);
+        }
     }
 
     // The caller borrows String's str.

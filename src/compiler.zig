@@ -160,15 +160,13 @@ pub const Compiler = struct {
 
     fn string(self: *Compiler, gpa: Allocator) CompilerError!void {
         const lexeme = self.previous.lexeme(self.source);
-
-        const str = try gpa.dupe(u8, lexeme[1 .. lexeme.len - 1]);
-        errdefer gpa.free(str);
+        const str = lexeme[1..lexeme.len - 1];
 
         // NOTE: Use imperative way for readability.
         const string_object = try gpa.create(String);
         errdefer gpa.destroy(string_object);
 
-        string_object.* = .init(str, Object{
+        string_object.* = .init(.@"const", str, Object{
             .kind = .string,
             .next = null,
         });
