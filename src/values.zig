@@ -105,12 +105,6 @@ pub const Obj = struct {
         string: []const u8,
     };
 
-    pub fn create(gpa: Allocator, obj: Obj) Allocator.Error!*Obj {
-        const new_obj = try gpa.create(Obj);
-        new_obj.* = obj;
-        return new_obj;
-    }
-
     pub fn destroy(self: *Obj, gpa: Allocator) void {
         switch (self.kind) {
             .string => |string| gpa.free(string),
