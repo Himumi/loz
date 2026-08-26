@@ -224,12 +224,12 @@ const ArrayList = std.ArrayList;
 const Io = std.Io;
 
 const compiler = @import("compiler.zig");
+const utils = @import("utils.zig");
 const values = @import("values.zig");
 const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
-const Stack = @import("Stack.zig");
-const utils = @import("utils.zig");
 const Compiler = compiler.Compiler;
+const Stack = utils.Stack;
 const Strings = utils.Table;
 const Object = values.Object;
 const String = values.String;
