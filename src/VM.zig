@@ -5,6 +5,7 @@ const VM = @This();
 chunk: *Chunk,
 ip: usize,
 stack: Stack,
+strings: Strings,
 // A linked list for runtime's Objects.
 objects: ?*Object,
 
@@ -18,24 +19,19 @@ pub const RuntimeError = error{
     OperandMustBeNumber,
 };
 
-pub const empty: VM = .{
-    .chunk = undefined,
-    .ip = 0,
-    .stack = .empty,
-    .objects = null,
-};
-
 pub fn initCapacity(gpa: Allocator, capacity: usize) Allocator.Error!VM {
     return .{
         .chunk = undefined,
         .ip = 0,
         .stack = try .initCapacity(gpa, capacity),
+        .strings = .init(gpa),
         .objects = null,
     };
 }
 
 pub fn deinit(self: *VM, gpa: Allocator) void {
     self.stack.deinit(gpa);
+    self.strings.deinit();
 
     var object_ptr = self.objects;
     while (object_ptr) |object| {
@@ -48,8 +44,10 @@ pub fn interpret(self: *VM, gpa: Allocator, ctx: *Context, source: [:0]const u8)
     var arena_allocator: std.heap.ArenaAllocator = .init(gpa);
     defer arena_allocator.deinit();
 
+    const arena = arena_allocator.allocator();
+
     // Chunk is a constant memory after compilation.
-    var chunk = try compiler.compile(arena_allocator.allocator(), ctx, source);
+    var chunk = try compiler.compile(arena, ctx, &self.strings, source);
 
     // It borrows the memory.
     self.chunk = &chunk;
@@ -175,18 +173,27 @@ fn concatenate(self: *VM, gpa: Allocator) !void {
         const concat = try mem.concat(gpa, u8, &.{ a_str.slice(), b_str.slice() });
         errdefer gpa.free(concat);
 
-        // NOTE: Use imperative way for readability.
-        const string_object = try gpa.create(String);
-        errdefer gpa.destroy(string_object);
+        const gop = try self.strings.getOrPut(concat);
+        if (gop.found_existing) {
+            // It has found a same string.
+            gpa.free(concat);
+        } else {
+            // NOTE: Use imperative way for readability.
+            const string_object = try gpa.create(String);
+            errdefer gpa.destroy(string_object);
 
-        string_object.* = .init(.owned, concat, Object{
-            .kind = .string,
-            .next = self.objects,
-        });
-        // Add the new object to VM's Objects to track the memory.
-        self.objects = &string_object.head;
+            string_object.* = .init(.owned, concat, Object{
+                .kind = .string,
+                .next = self.objects,
+            });
+            // Add the new object to VM's Objects to track the memory.
+            self.objects = &string_object.head;
+            // Add the new object to VM's Strings.
+            gop.value_ptr.* = string_object;
+        }
 
-        try self.stack.push(gpa, .{ .object = &string_object.head });
+        const head = &gop.value_ptr.*.head;
+        try self.stack.push(gpa, .{ .object = head });
     } else {
         return error.InvalidBinaryOperation;
     }
@@ -221,7 +228,9 @@ const values = @import("values.zig");
 const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
 const Stack = @import("Stack.zig");
+const utils = @import("utils.zig");
 const Compiler = compiler.Compiler;
+const Strings = utils.Table;
 const Object = values.Object;
 const String = values.String;
 const Value = values.Value;

@@ -1,5 +1,10 @@
-pub fn compile(gpa: Allocator, ctx: *Context, source: [:0]const u8) CompilerError!Chunk {
-    var compiler: Compiler = .init(source);
+pub fn compile(
+    gpa: Allocator,
+    ctx: *Context,
+    strings: *Strings,
+    source: [:0]const u8,
+) CompilerError!Chunk {
+    var compiler: Compiler = .init(source, strings);
     return compiler.compile(gpa, ctx);
 }
 
@@ -9,6 +14,8 @@ pub const CompilerError =
     Io.Writer.Error;
 
 pub const Compiler = struct {
+    /// Borrow from the caller.
+    strings: *Strings,
     source: [:0]const u8,
     /// Borrow from the caller.
     ctx: *Context,
@@ -69,8 +76,9 @@ pub const Compiler = struct {
 
     const RuleList = std.EnumArray(Token.Tag, Rule);
 
-    pub fn init(source: [:0]const u8) Compiler {
+    pub fn init(source: [:0]const u8, strings: *Strings) Compiler {
         return .{
+            .strings = strings,
             .source = source,
             .ctx = undefined,
 
@@ -85,7 +93,11 @@ pub const Compiler = struct {
         };
     }
 
-    pub fn compile(self: *Compiler, gpa: Allocator, ctx: *Context) CompilerError!Chunk {
+    pub fn compile(
+        self: *Compiler,
+        gpa: Allocator,
+        ctx: *Context,
+    ) CompilerError!Chunk {
         // Initialize the chunk here to prevent mismatching memory ownership.
         var chunk: Chunk = .empty;
         errdefer chunk.deinit(gpa);
@@ -160,17 +172,23 @@ pub const Compiler = struct {
 
     fn string(self: *Compiler, gpa: Allocator) CompilerError!void {
         const lexeme = self.previous.lexeme(self.source);
-        const str = lexeme[1..lexeme.len - 1];
+        const str = lexeme[1 .. lexeme.len - 1];
 
-        // NOTE: Use imperative way for readability.
-        const string_object = try gpa.create(String);
-        errdefer gpa.destroy(string_object);
+        const gop = try self.strings.getOrPut(str);
+        if (!gop.found_existing) {
+            // NOTE: Use imperative way for readability.
+            const string_object = try gpa.create(String);
+            errdefer gpa.destroy(string_object);
 
-        string_object.* = .init(.@"const", str, Object{
-            .kind = .string,
-            .next = null,
-        });
-        try self.emitConstant(gpa, .{ .object = &string_object.head });
+            string_object.* = .init(.@"const", str, Object{
+                .kind = .string,
+                .next = null,
+            });
+
+            gop.value_ptr.* = string_object;
+        }
+
+        try self.emitConstant(gpa, .{ .object = &gop.value_ptr.*.head });
     }
 
     fn grouping(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -418,6 +436,13 @@ test "compiler" {
     try testCompile(
         \\ "hello, " + "world!"
     , "hello, world!");
+
+    try testCompile(
+        \\ "hello" == "hello"
+    , "true");
+    try testCompile(
+        \\ "hello" == "world"
+    , "false");
 }
 
 fn testCompile(source: [:0]const u8, expected: []const u8) !void {
@@ -428,7 +453,7 @@ fn testCompile(source: [:0]const u8, expected: []const u8) !void {
 
     var ctx: Context = .init(undefined, .{ .out = &stream.writer, .err = &stream.writer });
 
-    var vm: VM = .empty;
+    var vm: VM = try .initCapacity(gpa, 256);
     defer vm.deinit(gpa);
 
     try vm.interpret(gpa, &ctx, source);
@@ -447,7 +472,9 @@ const tokenizer = @import("tokenizer.zig");
 const values = @import("values.zig");
 const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
+const utils = @import("utils.zig");
 const VM = @import("VM.zig");
+const Strings = utils.Table;
 const Object = values.Object;
 const String = values.String;
 const Value = values.Value;
