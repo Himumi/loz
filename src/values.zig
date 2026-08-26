@@ -46,9 +46,8 @@ pub const Value = union(enum) {
             .nil => return true,
             .boolean => |boolean| boolean == target.boolean,
             .number => |number| number == target.number,
-            // TODO: Evaluation for Object.
-            .object => |object| object.isEqual(target.object),
-            // else => false,
+            // NOTE: Thanks to string interner, It can compare the strings using the pointers.
+            .object => |object| object == target.object,
         };
     }
 
@@ -129,18 +128,6 @@ pub const Object = struct {
         return false;
     }
 
-    pub fn isEqual(self: *Object, target: *Object) bool {
-        if (!self.isSame(target)) return false;
-
-        return switch (self.kind) {
-            .string => {
-                const parent_ptr: *String = @fieldParentPtr("head", self);
-                const target_ptr: *String = @fieldParentPtr("head", target);
-                return mem.eql(u8, parent_ptr.slice(), target_ptr.slice());
-            },
-        };
-    }
-
     pub fn print(self: *Object, writer: *Io.Writer) Io.Writer.Error!void {
         switch (self.kind) {
             .string => {
@@ -173,7 +160,6 @@ test "Object" {
     const object = &str.head;
     const target = &str2.head;
     try testing.expectEqual(true, object.isSame(target));
-    try testing.expectEqual(true, object.isEqual(target));
 }
 
 pub const String = struct {
