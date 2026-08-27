@@ -23,6 +23,8 @@ pub const Compiler = struct {
     chunk: *Chunk,
     scanner: Scanner,
 
+    global_symbols: *std.AutoHashMap(*String, u32),
+
     current: Token,
     previous: Token,
 
@@ -71,6 +73,7 @@ pub const Compiler = struct {
             unary,
             binary,
             literal,
+            variable,
         };
     };
 
@@ -84,6 +87,8 @@ pub const Compiler = struct {
 
             .chunk = undefined,
             .scanner = .init(source),
+
+            .global_symbols = undefined,
 
             .current = undefined,
             .previous = undefined,
@@ -102,10 +107,15 @@ pub const Compiler = struct {
         var chunk: Chunk = .empty;
         errdefer chunk.deinit(gpa);
 
+        var global_symbols: std.AutoHashMap(*String, u32) = .init(gpa);
+        defer global_symbols.deinit();
+
         // Borrow the chunk memory.
         self.chunk = &chunk;
         // Borrow the context memory.
         self.ctx = ctx;
+        // Borrow the global_symbols memory.
+        self.global_symbols = &global_symbols;
 
         // Make sure to false at start up.
         self.had_error = false;
@@ -115,7 +125,9 @@ pub const Compiler = struct {
         try self.advance();
 
         // Compile one expression.
-        try self.expression(gpa);
+        while (self.current.tag != .eof) {
+            try self.declaration(gpa);
+        }
         try self.consume(.eof, "Expect end of expression.");
 
         try self.emitReturn(gpa);
@@ -126,8 +138,109 @@ pub const Compiler = struct {
         return chunk;
     }
 
+    fn declaration(self: *Compiler, gpa: Allocator) CompilerError!void {
+        switch (self.current.tag) {
+            .keyword_var => {
+                try self.advance();
+                try self.varDeclaration(gpa);
+            },
+            else => try self.statement(gpa),
+        }
+        if (self.panic_mode) try self.sync();
+    }
+
+    fn varDeclaration(self: *Compiler, gpa: Allocator) CompilerError!void {
+        const previous_line = self.previous.line;
+        const global_index = try self.parseVariable(gpa, "Expect variable name.");
+
+        if (self.current.tag == .equal) {
+            try self.advance();
+            try self.expression(gpa);
+        } else {
+            try self.emitByte(gpa, .op_nil);
+        }
+        try self.consume(.semicolon, "Expect ';' after variable expression.");
+
+        try self.defineVariable(gpa, global_index, previous_line);
+    }
+
+    fn parseVariable(self: *Compiler, gpa: Allocator, err_message: []const u8) !u32 {
+        try self.consume(.identifier, err_message);
+        return try self.identifierConstant(gpa, self.previous);
+    }
+
+    fn identifierConstant(self: *Compiler, gpa: Allocator, token: Token) !u32 {
+        const lexeme = token.lexeme(self.source);
+
+        const gop = try self.strings.getOrPut(lexeme);
+        if (!gop.found_existing) {
+            const string_object = try gpa.create(String);
+            errdefer gpa.destroy(string_object);
+
+            string_object.* = .init(.@"const", lexeme, Object{
+                .kind = .string,
+                .next = null,
+            });
+
+            gop.value_ptr.* = string_object;
+        }
+
+        return self.makeConstant(gpa, .{ .object = &gop.value_ptr.*.head });
+    }
+
+    fn defineVariable(self: *Compiler, gpa: Allocator, global_index: u32, line: u32) !void {
+        const code: Chunk.Code =
+            if (global_index < 256) .op_define_global else .op_define_global_long;
+
+        try self.emitByte(gpa, code);
+        try self.emitLiteral(gpa, global_index, line);
+    }
+
+    fn statement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        switch (self.current.tag) {
+            .keyword_print => {
+                try self.advance();
+                try self.printStatement(gpa);
+            },
+            else => try self.expressionStatement(gpa),
+        }
+    }
+
+    fn printStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        try self.expression(gpa);
+        try self.consume(.semicolon, "Expect ';' after value.");
+        try self.emitByte(gpa, .op_print);
+    }
+
+    fn expressionStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        try self.expression(gpa);
+        try self.consume(.semicolon, "Expect ';' after value.");
+        try self.emitByte(gpa, .op_pop);
+    }
+
     fn expression(self: *Compiler, gpa: Allocator) CompilerError!void {
         try self.parsePrecedence(gpa, .assignment);
+    }
+
+    fn sync(self: *Compiler) CompilerError!void {
+        self.panic_mode = false;
+
+        while (self.current.tag != .eof) {
+            if (self.previous.tag == .keyword_return) return;
+            switch (self.current.tag) {
+                .keyword_class,
+                .keyword_fun,
+                .keyword_var,
+                .keyword_for,
+                .keyword_if,
+                .keyword_while,
+                .keyword_print,
+                .keyword_return,
+                => return,
+                else => {},
+            }
+            try self.advance();
+        }
     }
 
     fn parsePrecedence(self: *Compiler, gpa: Allocator, precedence: Precedence) CompilerError!void {
@@ -139,21 +252,34 @@ pub const Compiler = struct {
             return error.ExpectedExpression;
         }
 
-        try self.parseRule(gpa, prefix_rule);
+        const prece_int = @intFromEnum(precedence);
+        const assign_int = @intFromEnum(Precedence.assignment);
+
+        const assignable = prece_int <= assign_int;
+        try self.parseRule(gpa, prefix_rule, assignable);
 
         while (true) {
-            const prece_int = @intFromEnum(precedence);
             const curr_prece_int = @intFromEnum(rules.get(self.current.tag).precedence);
 
             if (prece_int > curr_prece_int) break;
             try self.advance();
 
             const infix_rule = rules.get(self.previous.tag).infix;
-            try self.parseRule(gpa, infix_rule);
+            try self.parseRule(gpa, infix_rule, assignable);
+        }
+
+        if (assignable and self.current.tag == .equal) {
+            try self.errorAt(self.current, "Invalid assignment target.");
+            try self.advance();
         }
     }
 
-    fn parseRule(self: *Compiler, gpa: Allocator, rule: Rule.Kind) CompilerError!void {
+    fn parseRule(
+        self: *Compiler,
+        gpa: Allocator,
+        rule: Rule.Kind,
+        assignable: bool,
+    ) CompilerError!void {
         return switch (rule) {
             .literal => try self.literal(gpa),
             .number => try self.number(gpa),
@@ -161,16 +287,17 @@ pub const Compiler = struct {
             .group => try self.grouping(gpa),
             .binary => try self.binary(gpa),
             .unary => try self.unary(gpa),
+            .variable => try self.variable(gpa, assignable),
             .null => {},
         };
     }
 
-    fn number(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn number(self: *Compiler, gpa: Allocator) !void {
         const value = try fmt.parseFloat(f64, self.previous.lexeme(self.source));
         try self.emitConstant(gpa, .{ .number = value });
     }
 
-    fn string(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn string(self: *Compiler, gpa: Allocator) !void {
         const lexeme = self.previous.lexeme(self.source);
         const str = lexeme[1 .. lexeme.len - 1];
 
@@ -188,7 +315,8 @@ pub const Compiler = struct {
             gop.value_ptr.* = string_object;
         }
 
-        try self.emitConstant(gpa, .{ .object = &gop.value_ptr.*.head });
+        const head = &gop.value_ptr.*.head;
+        try self.emitConstant(gpa, .{ .object = head });
     }
 
     fn grouping(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -251,13 +379,37 @@ pub const Compiler = struct {
         }
     }
 
+    fn variable(self: *Compiler, gpa: Allocator, assignable: bool) CompilerError!void {
+        try self.namedVariable(gpa, self.previous, assignable);
+    }
+
+    fn namedVariable(
+        self: *Compiler,
+        gpa: Allocator,
+        token: Token,
+        assignable: bool,
+    ) CompilerError!void {
+        const arg_index = try self.identifierConstant(gpa, token);
+
+        if (assignable and self.current.tag == .equal) {
+            try self.advance();
+            try self.expression(gpa);
+
+            try self.emitByte(gpa, if (arg_index < 256) .op_set_global else .op_set_global_long);
+        } else {
+            try self.emitByte(gpa, if (arg_index < 256) .op_get_global else .op_get_global_long);
+        }
+
+        try self.emitLiteral(gpa, arg_index, token.line);
+    }
+
     fn advance(self: *Compiler) Io.Writer.Error!void {
         self.previous = self.current;
 
         while (true) {
             self.current = self.scanner.next();
             if (self.current.tag != .invalid) break;
-            // NOTE: Create invalid token validator.
+            // TODO: Create invalid token validator.
             try self.errorAt(self.current, "Invalid token.");
         }
     }
@@ -298,7 +450,17 @@ pub const Compiler = struct {
         value: Value,
     ) (Allocator.Error || Io.Writer.Error)!void {
         const value_index = try self.makeConstant(gpa, value);
-        try self.chunk.writeConstant(gpa, value_index, self.previous.line);
+        try self.chunk.writeConstant(gpa, @intCast(value_index), self.previous.line);
+    }
+
+    fn emitLiteral(self: *Compiler, gpa: Allocator, index: u32, line: u32) Allocator.Error!void {
+        if (index < 256) {
+            try self.chunk.writeLiteral(gpa, @intCast(index), line);
+        } else {
+            for (Chunk.trucate3Bytes(index)) |byte| {
+                try self.chunk.writeLiteral(gpa, byte, line);
+            }
+        }
     }
 
     fn emitReturn(self: *Compiler, gpa: Allocator) Allocator.Error!void {
@@ -314,8 +476,17 @@ pub const Compiler = struct {
         gpa: Allocator,
         value: Value,
     ) (Allocator.Error || Io.Writer.Error)!u32 {
+        // Prevent deduplication for constants.
+        if (value.isString()) {
+            for (self.chunk.constants.items, 0..) |constant, index| {
+                if (constant.isString() and constant.isEqual(value)) {
+                    return @intCast(index);
+                }
+            }
+        }
+
         const index = try self.chunk.addValue(gpa, value);
-        if (index > 256) {
+        if (index > 16_777_215) { // Update based on constant long.
             try self.errorAt(self.previous, "Too many constants in one chunk");
             return 0;
         }
@@ -355,6 +526,11 @@ pub const Compiler = struct {
         },
         .string = .{
             .prefix = .string,
+            .infix = .null,
+            .precedence = .none,
+        },
+        .identifier = .{
+            .prefix = .variable,
             .infix = .null,
             .precedence = .none,
         },
@@ -412,37 +588,56 @@ pub const Compiler = struct {
 };
 
 test "compiler" {
-    try testCompile("(1 + 2) * 3", "9");
-    try testCompile("1 + 2 * 3", "7");
-    try testCompile("10 - 5 / 1", "5");
-    try testCompile("true", "true");
-    try testCompile("false", "false");
-    try testCompile("nil", "nil");
-    try testCompile("!true", "false");
-    try testCompile("!false", "true");
-    try testCompile("!nil", "true");
-    try testCompile("!10", "false");
-    try testCompile("10 == 10", "true");
-    try testCompile("10 != 10", "false");
-    try testCompile("10 < 10", "false");
-    try testCompile("10 <= 10", "true");
-    try testCompile("10 > 10", "false");
-    try testCompile("10 >= 10", "true");
-    try testCompile("!(5 - 4 > 3 * 2 == !nil)", "true");
+    try testCompile("print (1 + 2) * 3;", "9");
+    try testCompile("print 1 + 2 * 3;", "7");
+    try testCompile("print 10 - 5 / 1;", "5");
+    try testCompile("print true;", "true");
+    try testCompile("print false;", "false");
+    try testCompile("print nil;", "nil");
+    try testCompile("print !true;", "false");
+    try testCompile("print !false;", "true");
+    try testCompile("print !nil;", "true");
+    try testCompile("print !10;", "false");
+    try testCompile("print 10 == 10;", "true");
+    try testCompile("print 10 != 10;", "false");
+    try testCompile("print 10 < 10;", "false");
+    try testCompile("print 10 <= 10;", "true");
+    try testCompile("print 10 > 10;", "false");
+    try testCompile("print 10 >= 10;", "true");
+    try testCompile("print !(5 - 4 > 3 * 2 == !nil);", "true");
     try testCompile(
-        \\ "hello"
+        \\ print "hello";
     , "hello");
 
     try testCompile(
-        \\ "hello, " + "world!"
+        \\ print "hello, " + "world!";
     , "hello, world!");
 
     try testCompile(
-        \\ "hello" == "hello"
+        \\ print "hello" == "hello";
     , "true");
     try testCompile(
-        \\ "hello" == "world"
+        \\ print "hello" == "world";
     , "false");
+
+    try testCompile(
+        \\ var name = "John";
+        \\ print "Hello " + name;
+    , "Hello John");
+
+    try testCompile(
+        \\ var name;
+        \\ name = "John";
+        \\ print name;
+    , "John");
+
+    try testCompile(
+        \\ var breakfast = "beignets";
+        \\ var beverage = "cafe au lait";
+        \\ breakfast = "beignets with " + beverage;
+        \\
+        \\ print breakfast;
+    , "beignets with cafe au lait");
 }
 
 fn testCompile(source: [:0]const u8, expected: []const u8) !void {

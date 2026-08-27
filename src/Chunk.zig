@@ -18,6 +18,14 @@ pub const Code = enum(u8) {
     op_negate,
 
     op_return,
+    op_print,
+    op_pop,
+    op_define_global,
+    op_define_global_long,
+    op_get_global,
+    op_get_global_long,
+    op_set_global,
+    op_set_global_long,
     _,
 
     pub fn toString(self: Code) []const u8 {
@@ -41,6 +49,14 @@ pub const Code = enum(u8) {
             .op_negate => "NEGATE",
 
             .op_return => "RETURN",
+            .op_print => "PRINT",
+            .op_pop => "POP",
+            .op_define_global => "DEFINE_GLOBAL",
+            .op_define_global_long => "DEFINE_GLOBAL_LONG",
+            .op_get_global => "GET_GLOBAL",
+            .op_get_global_long => "GET_GLOBAL_LONG",
+            .op_set_global => "SET_GLOBAL",
+            .op_set_global_long => "SET_GLOBAL_LONG",
             _ => "UNKNOWN",
         };
     }
@@ -74,12 +90,7 @@ pub fn deinit(self: *Chunk, gpa: Allocator) void {
     self.lines.deinit(gpa);
 }
 
-pub fn writeLiteral(
-    self: *Chunk,
-    gpa: Allocator,
-    literal: u8,
-    line: usize,
-) Allocator.Error!void {
+pub fn writeLiteral(self: *Chunk, gpa: Allocator, literal: u8, line: usize) Allocator.Error!void {
     try self.codes.append(gpa, literal);
 
     if (self.lines.items.len > 0) {
@@ -93,24 +104,18 @@ pub fn writeLiteral(
     try self.lines.append(gpa, .{ .count = 1, .line = line });
 }
 
-pub fn writeChunk(
-    self: *Chunk,
-    gpa: Allocator,
-    code: Code,
-    line: usize,
-) Allocator.Error!void {
+pub fn writeChunk(self: *Chunk, gpa: Allocator, code: Code, line: usize) Allocator.Error!void {
     try self.writeLiteral(gpa, @intFromEnum(code), line);
 }
 
 pub fn writeConstant(
     self: *Chunk,
     gpa: Allocator,
-    value_index: usize,
+    value_index: u32,
     line: usize,
 ) Allocator.Error!void {
     if (value_index > 255) {
-        const value_24: u24 = @truncate(value_index);
-        const bytes: [3]u8 = @bitCast(value_24);
+        const bytes = trucate3Bytes(value_index);
 
         try self.writeChunk(gpa, .op_constant_long, line);
         for (bytes) |byte| {
@@ -122,12 +127,18 @@ pub fn writeConstant(
     }
 }
 
+pub fn trucate3Bytes(index: u32) [3]u8 {
+    const value_24: u24 = @truncate(index);
+    return @bitCast(value_24);
+}
+
 pub fn addValue(self: *Chunk, gpa: Allocator, value: Value) Allocator.Error!u32 {
     try self.constants.append(gpa, value);
     return @intCast(self.constants.items.len - 1);
 }
 
 /// For debugging purpose.
+/// BUG: diassaemble is broken.
 pub fn disassemble(self: Chunk, writer: *Io.Writer, name: []const u8) Io.Writer.Error!void {
     try writer.print("== {s} ==\n", .{name});
 
@@ -143,8 +154,8 @@ pub fn disassembleInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !u
 
     const instruction: Code = @enumFromInt(self.codes.items[offset]);
     return switch (instruction) {
-        .op_constant => try self.constantInstruction(writer, offset),
-        .op_constant_long => try self.constantLongInstruction(writer, offset),
+        .op_constant => try self.constantInstruction(writer, .op_constant, offset),
+        .op_constant_long => try self.constantLongInstruction(writer, .op_constant_long, offset),
 
         .op_nil => try simpleInstruction(writer, .op_nil, offset),
         .op_true => try simpleInstruction(writer, .op_true, offset),
@@ -162,6 +173,27 @@ pub fn disassembleInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !u
 
         .op_negate => try simpleInstruction(writer, .op_negate, offset),
         .op_return => try simpleInstruction(writer, .op_return, offset),
+        .op_print => try simpleInstruction(writer, .op_print, offset),
+        .op_pop => try simpleInstruction(writer, .op_pop, offset),
+
+        .op_define_global => {
+            return try self.constantInstruction(writer, .op_define_global, offset);
+        },
+        .op_define_global_long => {
+            return try self.constantLongInstruction(writer, .op_define_global_long, offset);
+        },
+        .op_get_global => {
+            return try self.constantInstruction(writer, .op_get_global, offset);
+        },
+        .op_get_global_long => {
+            return try self.constantLongInstruction(writer, .op_get_global_long, offset);
+        },
+        .op_set_global => {
+            return try self.constantInstruction(writer, .op_set_global, offset);
+        },
+        .op_set_global_long => {
+            return try self.constantInstruction(writer, .op_set_global_long, offset);
+        },
 
         else => {
             try writer.print("Unknown opcode {any}\n", .{instruction});
@@ -170,8 +202,8 @@ pub fn disassembleInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !u
     };
 }
 
-fn constantInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !usize {
-    const name = Code.op_constant.toString();
+fn constantInstruction(self: Chunk, writer: *Io.Writer, code: Code, offset: usize) !usize {
+    const name = code.toString();
     const constant = self.codes.items[offset + 1];
     const value = self.constants.items[@intCast(constant)];
 
@@ -179,8 +211,8 @@ fn constantInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !usize {
     return offset + 2;
 }
 
-fn constantLongInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !usize {
-    const name = Code.op_constant_long.toString();
+fn constantLongInstruction(self: Chunk, writer: *Io.Writer, code: Code, offset: usize) !usize {
+    const name = code.toString();
     const constant = self.getConstantLong(offset + 1);
     const value = self.constants.items[@intCast(constant)];
 
@@ -193,6 +225,7 @@ pub fn getConstantLong(self: Chunk, offset: usize) u32 {
     return mem.readInt(u24, bytes[0..3], .big);
 }
 
+/// BUG: getLine is broken makes the diassaemble function to not work.
 pub fn getLine(self: Chunk, instruction_offset: usize) ?usize {
     var accumulator: usize = 0;
 
@@ -205,6 +238,7 @@ pub fn getLine(self: Chunk, instruction_offset: usize) ?usize {
     return null;
 }
 
+/// BUG: printLine is broken makes the diassaemble function to not work.
 fn printLine(self: Chunk, writer: *Io.Writer, offset: usize) Io.Writer.Error!void {
     if (self.getLine(offset)) |line| {
         if (offset > 0) {
@@ -234,7 +268,7 @@ test "Chunk" {
     const values = [_]Value{.{ .number = 0 }} ** 256;
     try chunk.constants.appendSlice(gpa, &values);
 
-    try chunk.writeConstant(gpa, chunk.constants.items.len - 1, 123);
+    try chunk.writeConstant(gpa, @intCast(chunk.constants.items.len - 1), 123);
     try chunk.writeChunk(gpa, .op_return, 123);
 
     var writer: Io.Writer.Allocating = .init(gpa);
