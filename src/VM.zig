@@ -128,6 +128,27 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
                 }
                 self.globals.items[@intCast(index)] = self.stack.peek();
             },
+            .op_get_local => {
+                const index = self.readIndex();
+                std.debug.print("get_local: index {}\n", .{index});
+                std.debug.print("get_local: stack {}\n", .{self.stack.slice().len});
+                for (self.stack.slice()) |value| {
+                    std.debug.print("get_local: stack {any}\n", .{value});
+                }
+                try self.stack.push(gpa, self.stack.store.items[@intCast(index)]);
+            },
+            .op_get_local_long => {
+                const index = self.readIndexLong();
+                try self.stack.push(gpa, self.stack.store.items[@intCast(index)]);
+            },
+            .op_set_local => {
+                const index = self.readIndex();
+                self.stack.store.items[@intCast(index)] = self.stack.peek();
+            },
+            .op_set_local_long => {
+                const index = self.readIndexLong();
+                self.stack.store.items[@intCast(index)] = self.stack.peek();
+            },
             else => return error.InvalidOperation,
         }
     }

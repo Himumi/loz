@@ -24,6 +24,7 @@ pub const Compiler = struct {
     scanner: Scanner,
 
     global_symbols: *std.AutoHashMap(*String, u32),
+    scope: utils.Scope,
 
     current: Token,
     previous: Token,
@@ -37,6 +38,7 @@ pub const Compiler = struct {
         ExpectedExpression,
         ExpectedLeftParen,
         TooManyConstants,
+        TooManyLocalVariables,
         InvalidCharacter,
     };
 
@@ -88,6 +90,7 @@ pub const Compiler = struct {
             .chunk = undefined,
             .scanner = .init(source),
 
+            .scope = .empty,
             .global_symbols = undefined,
 
             .current = undefined,
@@ -166,7 +169,72 @@ pub const Compiler = struct {
 
     fn parseVariable(self: *Compiler, gpa: Allocator, err_message: []const u8) !u32 {
         try self.consume(.identifier, err_message);
+
+        try self.declareVariable();
+        if (self.scope.depth > 0) return 0;
+
         return try self.identifierConstant(gpa, self.previous);
+    }
+
+    fn declareVariable(self: *Compiler) CompilerError!void {
+        if (self.scope.depth == 0) return;
+        const token = self.previous;
+
+        if (self.scope.count > 0) {
+            var index: isize = self.scope.count - 1;
+            while (index >= 0) : (index -= 1) {
+                const local = self.scope.locals[@intCast(index)];
+
+                if (local.depth) |depth| {
+                    if (depth < self.scope.depth) break;
+                }
+
+                if (self.identifierEqual(token, local.token)) {
+                    try self.errorAt(
+                        token,
+                        "Already a variable with this name in this scope: {s}.",
+                    );
+                }
+            }
+        }
+
+        self.scope.add(token) catch |err| {
+            try self.errorAt(self.previous, "Too many local variables in scope.");
+            return err;
+        };
+    }
+
+    fn defineVariable(self: *Compiler, gpa: Allocator, global_index: u32, line: u32) !void {
+        if (self.scope.depth > 0) {
+            self.scope.mark();
+            return;
+        }
+
+        const code: Chunk.Code =
+            if (global_index < 256) .op_define_global else .op_define_global_long;
+
+        try self.emitByte(gpa, code);
+        try self.emitLiteral(gpa, global_index, line);
+    }
+
+    fn resolveLocal(self: *Compiler, token: Token) !?u32 {
+        if (self.scope.count > 0) {
+            var index: isize = self.scope.count - 1;
+            while (index >= 0) : (index -= 1) {
+                const local = self.scope.locals[@intCast(index)];
+                if (self.identifierEqual(local.token, token)) {
+                    if (local.depth == null) {
+                        // TODO: Need a better error handling.
+                        try self.errorAt(
+                            self.previous,
+                            "Can't read local variable in its own initializer.",
+                        );
+                    }
+                    return @intCast(index);
+                }
+            }
+        }
+        return null;
     }
 
     fn identifierConstant(self: *Compiler, gpa: Allocator, token: Token) !u32 {
@@ -188,12 +256,13 @@ pub const Compiler = struct {
         return self.makeConstant(gpa, .{ .object = &gop.value_ptr.*.head });
     }
 
-    fn defineVariable(self: *Compiler, gpa: Allocator, global_index: u32, line: u32) !void {
-        const code: Chunk.Code =
-            if (global_index < 256) .op_define_global else .op_define_global_long;
+    fn identifierEqual(self: Compiler, a: Token, b: Token) bool {
+        const a_lexeme = a.lexeme(self.source);
+        const b_lexeme = b.lexeme(self.source);
 
-        try self.emitByte(gpa, code);
-        try self.emitLiteral(gpa, global_index, line);
+        if (a_lexeme.len != b_lexeme.len) return false;
+
+        return mem.eql(u8, a_lexeme, b_lexeme);
     }
 
     fn statement(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -201,6 +270,13 @@ pub const Compiler = struct {
             .keyword_print => {
                 try self.advance();
                 try self.printStatement(gpa);
+            },
+            .l_brace => {
+                try self.advance();
+
+                self.beginScope();
+                try self.block(gpa);
+                try self.endScope(gpa);
             },
             else => try self.expressionStatement(gpa),
         }
@@ -220,6 +296,33 @@ pub const Compiler = struct {
 
     fn expression(self: *Compiler, gpa: Allocator) CompilerError!void {
         try self.parsePrecedence(gpa, .assignment);
+    }
+
+    fn block(self: *Compiler, gpa: Allocator) CompilerError!void {
+        while (self.current.tag != .r_brace and self.current.tag != .eof) {
+            try self.declaration(gpa);
+        }
+        try self.consume(.r_brace, "Expect '}' after block.");
+    }
+
+    fn beginScope(self: *Compiler) void {
+        self.scope.depth += 1;
+    }
+
+    fn endScope(self: *Compiler, gpa: Allocator) !void {
+        self.scope.depth -= 1;
+
+        while (true) {
+            if (self.scope.count == 0) break;
+
+            const local = self.scope.locals[self.scope.count - 1];
+            if (local.depth) |depth| {
+                if (depth <= self.scope.depth) break;
+            }
+
+            try self.emitByte(gpa, .op_pop);
+            self.scope.count -= 1;
+        }
     }
 
     fn sync(self: *Compiler) CompilerError!void {
@@ -389,17 +492,30 @@ pub const Compiler = struct {
         token: Token,
         assignable: bool,
     ) CompilerError!void {
-        const arg_index = try self.identifierConstant(gpa, token);
+        const local_index = try self.resolveLocal(token);
+        const arg_index: u32 = if (local_index) |index|
+            index
+        else
+            try self.identifierConstant(gpa, token);
 
+        const is_short = arg_index < 256;
+
+        var code: Chunk.Code = undefined;
         if (assignable and self.current.tag == .equal) {
             try self.advance();
             try self.expression(gpa);
 
-            try self.emitByte(gpa, if (arg_index < 256) .op_set_global else .op_set_global_long);
+            code = if (is_short) .op_set_local else .op_set_local_long;
+            if (local_index == null) {
+                code = if (is_short) .op_set_global else .op_set_global_long;
+            }
         } else {
-            try self.emitByte(gpa, if (arg_index < 256) .op_get_global else .op_get_global_long);
+            code = if (is_short) .op_get_local else .op_get_local_long;
+            if (local_index == null) {
+                code = if (is_short) .op_get_global else .op_get_global_long;
+            }
         }
-
+        try self.emitByte(gpa, code);
         try self.emitLiteral(gpa, arg_index, token.line);
     }
 
@@ -414,6 +530,7 @@ pub const Compiler = struct {
         }
     }
 
+    // TODO: Need a better error handling.
     fn errorAt(self: *Compiler, token: Token, message: []const u8) Io.Writer.Error!void {
         if (self.panic_mode) return;
         self.panic_mode = true;
@@ -638,6 +755,12 @@ test "compiler" {
         \\
         \\ print breakfast;
     , "beignets with cafe au lait");
+
+    try testCompile(
+        \\ var name = "John";
+        \\ { name = "lua"; }
+        \\ print name;
+    , "lua");
 }
 
 fn testCompile(source: [:0]const u8, expected: []const u8) !void {

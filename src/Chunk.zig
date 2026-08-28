@@ -26,6 +26,10 @@ pub const Code = enum(u8) {
     op_get_global_long,
     op_set_global,
     op_set_global_long,
+    op_get_local,
+    op_get_local_long,
+    op_set_local,
+    op_set_local_long,
     _,
 
     pub fn toString(self: Code) []const u8 {
@@ -57,6 +61,11 @@ pub const Code = enum(u8) {
             .op_get_global_long => "GET_GLOBAL_LONG",
             .op_set_global => "SET_GLOBAL",
             .op_set_global_long => "SET_GLOBAL_LONG",
+            .op_get_local => "GET_LOCAL",
+            .op_get_local_long => "GET_LOCAL_LONG",
+            .op_set_local => "SET_LOCAL",
+            .op_set_local_long => "SET_LOCAL_LONG",
+
             _ => "UNKNOWN",
         };
     }
@@ -194,12 +203,30 @@ pub fn disassembleInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !u
         .op_set_global_long => {
             return try self.constantInstruction(writer, .op_set_global_long, offset);
         },
+        .op_get_local => try self.byteInstruction(writer, .op_get_local, offset),
+        .op_get_local_long => try self.byteLongInstruction(writer, .op_get_local_long, offset),
+        .op_set_local => try self.byteInstruction(writer, .op_set_local, offset),
+        .op_set_local_long => try self.byteLongInstruction(writer, .op_set_local_long, offset),
 
         else => {
             try writer.print("Unknown opcode {any}\n", .{instruction});
             return offset + 1;
         },
     };
+}
+
+fn byteInstruction(self: Chunk, writer: *Io.Writer, code: Code, offset: usize) !usize {
+    const name = code.toString();
+    const slot = self.codes.items[offset + 1];
+    try writer.print("{s:<16} {d:>4}\n", .{ name, slot });
+    return offset + 2;
+}
+
+fn byteLongInstruction(self: Chunk, writer: *Io.Writer, code: Code, offset: usize) !usize {
+    const name = code.toString();
+    const slot = self.getConstantLong(offset + 1);
+    try writer.print("{s:<16} {d:>4}\n", .{ name, slot });
+    return offset + 4;
 }
 
 fn constantInstruction(self: Chunk, writer: *Io.Writer, code: Code, offset: usize) !usize {
