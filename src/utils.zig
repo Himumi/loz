@@ -65,12 +65,57 @@ pub const Stack = struct {
     }
 };
 
+pub const Scope = struct {
+    locals: [local_max]Local,
+    count: u32,
+    depth: u32,
+
+    pub const local_max: usize = 65_535;
+    pub const Local = struct {
+        token: Token,
+        depth: ?u32,
+    };
+
+    pub const empty: Scope = .{
+        .locals = undefined,
+        .count = 0,
+        .depth = 0,
+    };
+
+    pub fn add(self: *Scope, token: Token) error{TooManyLocalVariables}!void {
+        if (self.count == local_max) {
+            return error.TooManyLocalVariables;
+        }
+
+        self.locals[self.count] = .{
+            .token = token,
+            .depth = null,
+        };
+        self.count += 1;
+    }
+
+    pub fn mark(self: *Scope) void {
+        if (self.count > 0) {
+            self.locals[self.count - 1].depth = self.depth;
+        }
+    }
+
+    pub fn begin(self: *Scope) void {
+        self.depth += 1;
+    }
+
+    pub fn end(self: *Scope) void {
+        self.depth -= 1;
+    }
+};
+
 const std = @import("std");
 const mem = std.mem;
 
 const Allocator = mem.Allocator;
 const Io = std.Io;
 
+const Token = @import("tokenizer.zig").Token;
 const values = @import("values.zig");
 const String = values.String;
 const Value = values.Value;
