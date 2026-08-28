@@ -61,10 +61,7 @@ pub const Stack = struct {
     }
 
     pub fn slice(self: Stack) []Value {
-        if (self.last()) |index| {
-            return self.store[0..index];
-        }
-        return &.{};
+        return self.store.items;
     }
 };
 
