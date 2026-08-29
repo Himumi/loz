@@ -18,6 +18,9 @@ pub const Code = enum(u8) {
     op_negate,
 
     op_return,
+    op_jump,
+    op_jump_if_false,
+    op_loop,
     op_print,
     op_pop,
     op_define_global,
@@ -30,6 +33,8 @@ pub const Code = enum(u8) {
     op_get_local_long,
     op_set_local,
     op_set_local_long,
+
+    op_empty,
     _,
 
     pub fn toString(self: Code) []const u8 {
@@ -53,6 +58,9 @@ pub const Code = enum(u8) {
             .op_negate => "NEGATE",
 
             .op_return => "RETURN",
+            .op_jump => "JUMP",
+            .op_jump_if_false => "JUMP_IF_FALSE",
+            .op_loop => "LOOP",
             .op_print => "PRINT",
             .op_pop => "POP",
             .op_define_global => "DEFINE_GLOBAL",
@@ -66,7 +74,8 @@ pub const Code = enum(u8) {
             .op_set_local => "SET_LOCAL",
             .op_set_local_long => "SET_LOCAL_LONG",
 
-            _ => "UNKNOWN",
+            .op_empty => "EMPTY",
+            else => "UNKNOWN",
         };
     }
 };
@@ -182,6 +191,9 @@ pub fn disassembleInstruction(self: Chunk, writer: *Io.Writer, offset: usize) !u
 
         .op_negate => try simpleInstruction(writer, .op_negate, offset),
         .op_return => try simpleInstruction(writer, .op_return, offset),
+        .op_jump => try self.jumpInstruction(writer, .op_jump, 1, offset),
+        .op_jump_if_false => try self.jumpInstruction(writer, .op_jump_if_false, 1, offset),
+        .op_loop => try self.jumpInstruction(writer, .op_loop, -1, offset),
         .op_print => try simpleInstruction(writer, .op_print, offset),
         .op_pop => try simpleInstruction(writer, .op_pop, offset),
 
@@ -247,9 +259,23 @@ fn constantLongInstruction(self: Chunk, writer: *Io.Writer, code: Code, offset: 
     return offset + 4;
 }
 
+fn jumpInstruction(self: Chunk, writer: *Io.Writer, code: Code, sign: isize, offset: usize) !usize {
+    const name = code.toString();
+    const jump_index: isize = self.getShort(offset + 1);
+    const i_offset: isize = @intCast(offset);
+    const start_index = (i_offset + 3 + sign + jump_index);
+    try writer.print("{s:>16} {d:>4} -> {}\n", .{ name, offset, start_index });
+    return offset + 3;
+}
+
 pub fn getConstantLong(self: Chunk, offset: usize) u32 {
     const bytes = self.codes.items[offset .. offset + 3];
     return mem.readInt(u24, bytes[0..3], .big);
+}
+
+pub fn getShort(self: Chunk, offset: usize) u32 {
+    const bytes = self.codes.items[offset .. offset + 2];
+    return mem.readInt(u16, bytes[0..2], .big);
 }
 
 /// BUG: getLine is broken makes the diassaemble function to not work.

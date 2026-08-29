@@ -89,6 +89,20 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
             .op_return => {
                 // Exit interpreter
             },
+            .op_jump => {
+                const offset = self.readShort();
+                self.ip += offset;
+            },
+            .op_jump_if_false => {
+                const offset = self.readShort();
+                if (self.stack.peek().isFalsey()) {
+                    self.ip += offset;
+                }
+            },
+            .op_loop => {
+                const offset = self.readShort();
+                self.ip -= offset;
+            },
             .op_print => {
                 const value = self.stack.pop() orelse return error.UndefinedValue;
                 try value.print(ctx.stream.out);
@@ -130,11 +144,6 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
             },
             .op_get_local => {
                 const index = self.readIndex();
-                std.debug.print("get_local: index {}\n", .{index});
-                std.debug.print("get_local: stack {}\n", .{self.stack.slice().len});
-                for (self.stack.slice()) |value| {
-                    std.debug.print("get_local: stack {any}\n", .{value});
-                }
                 try self.stack.push(gpa, self.stack.store.items[@intCast(index)]);
             },
             .op_get_local_long => {
@@ -169,6 +178,13 @@ fn readConstantLong(self: *VM) Value {
     const index = self.chunk.getConstantLong(self.ip);
     self.ip += 3;
     return self.chunk.constants.items[@intCast(index)];
+}
+
+fn readShort(self: *VM) u32 {
+    const bytes = self.chunk.codes.items[self.ip .. self.ip + 2];
+    const index = mem.readInt(u16, bytes[0..2], .big);
+    self.ip += 2;
+    return index;
 }
 
 fn readIndex(self: *VM) u32 {

@@ -72,6 +72,8 @@ pub const Compiler = struct {
             null,
             number,
             string,
+            @"and",
+            @"or",
             group,
             unary,
             binary,
@@ -183,16 +185,18 @@ pub const Compiler = struct {
         if (self.scope.depth == 0) return;
         const token = self.previous;
 
-        var index: isize = self.scope.count - 1;
-        while (index >= 0) : (index -= 1) {
-            const local = self.scope.locals[@intCast(index)];
+        if (self.scope.count > 0) {
+            var index: isize = self.scope.count - 1;
+            while (index >= 0) : (index -= 1) {
+                const local = self.scope.locals[@intCast(index)];
 
-            if (local.depth) |depth| {
-                if (depth < self.scope.depth) break;
-            }
+                if (local.depth) |depth| {
+                    if (depth < self.scope.depth) break;
+                }
 
-            if (token.equalLexeme(self.source, local.token)) {
-                try self.errorAt(token, "Already a variable with this name in this scope.");
+                if (token.equalLexeme(self.source, local.token)) {
+                    try self.errorAt(token, "Already a variable with this name in this scope.");
+                }
             }
         }
 
@@ -258,6 +262,18 @@ pub const Compiler = struct {
                 try self.advance();
                 try self.printStatement(gpa);
             },
+            .keyword_if => {
+                try self.advance();
+                try self.ifStatement(gpa);
+            },
+            .keyword_while => {
+                try self.advance();
+                try self.whileStatement(gpa);
+            },
+            .keyword_for => {
+                try self.advance();
+                try self.forStatement(gpa);
+            },
             .l_brace => {
                 try self.advance();
 
@@ -279,6 +295,136 @@ pub const Compiler = struct {
         try self.expression(gpa);
         try self.consume(.semicolon, "Expect ';' after value.");
         try self.emitByte(gpa, .op_pop);
+    }
+
+    fn ifStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        try self.consume(.l_paren, "Expect '(' after 'if'.");
+        try self.expression(gpa);
+        try self.consume(.r_paren, "Expect ')' after condition.");
+
+        const then_index = try self.emitJump(gpa, .op_jump_if_false);
+        try self.emitByte(gpa, .op_pop);
+        try self.statement(gpa);
+
+        const else_index = try self.emitJump(gpa, .op_jump);
+        try self.patchJump(@intCast(then_index));
+
+        try self.emitByte(gpa, .op_pop);
+        if (self.current.tag == .keyword_else) {
+            try self.advance();
+            try self.statement(gpa);
+        }
+        try self.patchJump(else_index);
+    }
+
+    fn whileStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        const loop_start = self.chunk.codes.items.len;
+        try self.consume(.l_paren, "Expect '(' after 'while'.");
+        try self.expression(gpa);
+        try self.consume(.r_paren, "Expect ')' after condition.");
+
+        const exit_index = try self.emitJump(gpa, .op_jump_if_false);
+        try self.emitByte(gpa, .op_pop);
+        try self.statement(gpa);
+        try self.emitLoop(gpa, loop_start);
+
+        try self.patchJump(exit_index);
+        try self.emitByte(gpa, .op_pop);
+    }
+
+    fn forStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        self.beginScope();
+
+        // 1. Initializer
+        try self.consume(.l_paren, "Expect '(' after 'for'.");
+        switch (self.current.tag) {
+            .semicolon => {
+                try self.advance();
+            },
+            .keyword_var => {
+                try self.advance();
+                try self.varDeclaration(gpa);
+            },
+            else => try self.expressionStatement(gpa),
+        }
+
+        // 2. Condition
+        var loop_start = self.chunk.codes.items.len;
+        var exit_index: ?u32 = null;
+
+        if (self.current.tag != .semicolon) {
+            try self.expression(gpa);
+            try self.consume(.semicolon, "Expect ';' after loop condition.");
+
+            exit_index = try self.emitJump(gpa, .op_jump_if_false);
+            try self.emitByte(gpa, .op_pop);
+        }
+
+        // 3. Increment Clause
+        if (self.current.tag != .r_paren) {
+            const body_index = try self.emitJump(gpa, .op_jump);
+            const increment_start = self.chunk.codes.items.len;
+
+            try self.expression(gpa);
+            try self.emitByte(gpa, .op_pop);
+            try self.consume(.r_paren, "Expect ')' after for clauses.");
+
+            try self.emitLoop(gpa, loop_start);
+            loop_start = increment_start;
+            try self.patchJump(body_index);
+        }
+
+        // 4. Statement Body
+        try self.statement(gpa);
+        try self.emitLoop(gpa, loop_start);
+
+        if (exit_index) |index| {
+            try self.patchJump(index);
+            try self.emitByte(gpa, .op_pop);
+        }
+        try self.endScope(gpa);
+    }
+
+    fn emitLoop(self: *Compiler, gpa: Allocator, loop_start: usize) !void {
+        try self.emitByte(gpa, .op_loop);
+
+        const offset = self.chunk.codes.items.len - loop_start + 2;
+        if (offset > std.math.maxInt(u16)) {
+            try self.errorAt(self.previous, "Loop body too large.");
+        }
+        const truncated: u16 = @truncate(offset);
+
+        var bytes: [2]u8 = undefined;
+        mem.writeInt(u16, &bytes, truncated, .big);
+
+        for (bytes) |byte| {
+            try self.emitByte(gpa, @enumFromInt(byte));
+            // try self.chunk.writeLiteral(gpa, byte, self.previous.line);
+        }
+    }
+
+    fn emitJump(self: *Compiler, gpa: Allocator, instruction: Chunk.Code) !u32 {
+        try self.emitByte(gpa, instruction);
+
+        try self.emitByte(gpa, .op_empty);
+        try self.emitByte(gpa, .op_empty);
+
+        return @intCast(self.chunk.codes.items.len - 2);
+    }
+
+    fn patchJump(self: *Compiler, offset: u32) !void {
+        const jump_index = self.chunk.codes.items.len - offset - 2;
+        if (jump_index > std.math.maxInt(u16)) {
+            try self.errorAt(self.current, "Too much code to jump over.");
+        }
+        const truncated: u16 = @truncate(jump_index);
+
+        var bytes: [2]u8 = undefined;
+        mem.writeInt(u16, &bytes, truncated, .big);
+
+        for (bytes, offset..) |byte, index| {
+            self.chunk.codes.items[index] = byte;
+        }
     }
 
     fn expression(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -372,6 +518,8 @@ pub const Compiler = struct {
             .literal => try self.literal(gpa),
             .number => try self.number(gpa),
             .string => try self.string(gpa),
+            .@"and" => try self.parseAnd(gpa),
+            .@"or" => try self.parseOr(gpa),
             .group => try self.grouping(gpa),
             .binary => try self.binary(gpa),
             .unary => try self.unary(gpa),
@@ -405,6 +553,26 @@ pub const Compiler = struct {
 
         const head = &gop.value_ptr.*.head;
         try self.emitConstant(gpa, .{ .object = head });
+    }
+
+    fn parseAnd(self: *Compiler, gpa: Allocator) !void {
+        const end_index = try self.emitJump(gpa, .op_jump_if_false);
+
+        try self.emitByte(gpa, .op_pop);
+        try self.parsePrecedence(gpa, .@"and");
+
+        try self.patchJump(end_index);
+    }
+
+    fn parseOr(self: *Compiler, gpa: Allocator) !void {
+        const else_index = try self.emitJump(gpa, .op_jump_if_false);
+        const end_index = try self.emitJump(gpa, .op_jump);
+
+        try self.patchJump(else_index);
+        try self.emitByte(gpa, .op_pop);
+
+        try self.parsePrecedence(gpa, .@"or");
+        try self.patchJump(end_index);
     }
 
     fn grouping(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -652,6 +820,16 @@ pub const Compiler = struct {
             .infix = .null,
             .precedence = .none,
         },
+        .keyword_and = .{
+            .prefix = .null,
+            .infix = .@"and",
+            .precedence = .@"and",
+        },
+        .keyword_or = .{
+            .prefix = .null,
+            .infix = .@"or",
+            .precedence = .@"or",
+        },
         .keyword_nil = .{
             .prefix = .literal,
             .infix = .null,
@@ -762,6 +940,27 @@ test "compiler" {
         \\ { name = "lua"; }
         \\ print name;
     , "lua");
+
+    try testCompile(
+        \\ if (false) print "true"; else print "false";
+    , "false");
+
+    try testCompile("print true and true;", "true");
+    try testCompile("print false or true;", "true");
+
+    try testCompile(
+        \\ var i = 0;
+        \\ while (i < 2) {
+        \\   print i;
+        \\   i = i + 1;
+        \\ }
+    , "01");
+
+    try testCompile(
+        \\ for (var i = 0; i < 2; i = i + 1) {
+        \\   print i;
+        \\ }
+    , "01");
 }
 
 fn testCompile(source: [:0]const u8, expected: []const u8) !void {
