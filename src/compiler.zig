@@ -16,6 +16,7 @@ pub const CompilerError =
 pub const Compiler = struct {
     /// Borrow from the caller.
     strings: *Strings,
+    /// Borrow from the caller.
     source: [:0]const u8,
     /// Borrow from the caller.
     ctx: *Context,
@@ -149,12 +150,15 @@ pub const Compiler = struct {
             },
             else => try self.statement(gpa),
         }
+        // TODO: Move this sync function to compile function with another error handling.
         if (self.panic_mode) try self.sync();
     }
 
     fn varDeclaration(self: *Compiler, gpa: Allocator) CompilerError!void {
         const previous_line = self.previous.line;
-        const global_index = try self.parseVariable(gpa, "Expect variable name.");
+        try self.consume(.identifier, "Expect variable name.");
+
+        const global_index = try self.parseVariable(gpa);
 
         if (self.current.tag == .equal) {
             try self.advance();
@@ -167,9 +171,7 @@ pub const Compiler = struct {
         try self.defineVariable(gpa, global_index, previous_line);
     }
 
-    fn parseVariable(self: *Compiler, gpa: Allocator, err_message: []const u8) !u32 {
-        try self.consume(.identifier, err_message);
-
+    fn parseVariable(self: *Compiler, gpa: Allocator) !u32 {
         try self.declareVariable();
         if (self.scope.depth > 0) return 0;
 
@@ -177,24 +179,20 @@ pub const Compiler = struct {
     }
 
     fn declareVariable(self: *Compiler) CompilerError!void {
+        // NOTE: Immediately return if the current declaration in global scope.
         if (self.scope.depth == 0) return;
         const token = self.previous;
 
-        if (self.scope.count > 0) {
-            var index: isize = self.scope.count - 1;
-            while (index >= 0) : (index -= 1) {
-                const local = self.scope.locals[@intCast(index)];
+        var index: isize = self.scope.count - 1;
+        while (index >= 0) : (index -= 1) {
+            const local = self.scope.locals[@intCast(index)];
 
-                if (local.depth) |depth| {
-                    if (depth < self.scope.depth) break;
-                }
+            if (local.depth) |depth| {
+                if (depth < self.scope.depth) break;
+            }
 
-                if (self.identifierEqual(token, local.token)) {
-                    try self.errorAt(
-                        token,
-                        "Already a variable with this name in this scope: {s}.",
-                    );
-                }
+            if (token.equalLexeme(self.source, local.token)) {
+                try self.errorAt(token, "Already a variable with this name in this scope.");
             }
         }
 
@@ -205,34 +203,31 @@ pub const Compiler = struct {
     }
 
     fn defineVariable(self: *Compiler, gpa: Allocator, global_index: u32, line: u32) !void {
-        if (self.scope.depth > 0) {
-            self.scope.mark();
-            return;
-        }
+        if (self.scope.depth > 0) return self.scope.mark();
 
-        const code: Chunk.Code =
-            if (global_index < 256) .op_define_global else .op_define_global_long;
+        const code: Chunk.Code = if (global_index < 256)
+            .op_define_global
+        else
+            .op_define_global_long;
 
         try self.emitByte(gpa, code);
         try self.emitLiteral(gpa, global_index, line);
     }
 
-    fn resolveLocal(self: *Compiler, token: Token) !?u32 {
-        if (self.scope.count > 0) {
-            var index: isize = self.scope.count - 1;
-            while (index >= 0) : (index -= 1) {
-                const local = self.scope.locals[@intCast(index)];
-                if (self.identifierEqual(local.token, token)) {
-                    if (local.depth == null) {
-                        // TODO: Need a better error handling.
-                        try self.errorAt(
-                            self.previous,
-                            "Can't read local variable in its own initializer.",
-                        );
-                    }
-                    return @intCast(index);
-                }
+    fn resolveLocal(self: *Compiler, token: Token) Io.Writer.Error!?u32 {
+        if (self.scope.count == 0) return null;
+
+        var index: isize = self.scope.count - 1;
+        while (index >= 0) : (index -= 1) {
+            const local = self.scope.locals[@intCast(index)];
+
+            if (!token.equalLexeme(self.source, local.token)) continue;
+
+            if (local.depth == null) {
+                // TODO: Need to return an error.
+                try self.errorAt(token, "Can't read local variable in its own initializer.");
             }
+            return @intCast(index);
         }
         return null;
     }
@@ -253,16 +248,8 @@ pub const Compiler = struct {
             gop.value_ptr.* = string_object;
         }
 
-        return self.makeConstant(gpa, .{ .object = &gop.value_ptr.*.head });
-    }
-
-    fn identifierEqual(self: Compiler, a: Token, b: Token) bool {
-        const a_lexeme = a.lexeme(self.source);
-        const b_lexeme = b.lexeme(self.source);
-
-        if (a_lexeme.len != b_lexeme.len) return false;
-
-        return mem.eql(u8, a_lexeme, b_lexeme);
+        const head = &gop.value_ptr.*.head;
+        return try self.makeConstant(gpa, .{ .object = head });
     }
 
     fn statement(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -310,18 +297,16 @@ pub const Compiler = struct {
     }
 
     fn endScope(self: *Compiler, gpa: Allocator) !void {
+        // TODO: Need an error handling if it is being called in global scope.
+        if (self.scope.depth == 0) return;
         self.scope.depth -= 1;
 
-        while (true) {
-            if (self.scope.count == 0) break;
-
+        while (self.scope.count > 0) : (self.scope.count -= 1) {
             const local = self.scope.locals[self.scope.count - 1];
             if (local.depth) |depth| {
                 if (depth <= self.scope.depth) break;
             }
-
             try self.emitByte(gpa, .op_pop);
-            self.scope.count -= 1;
         }
     }
 
@@ -435,7 +420,7 @@ pub const Compiler = struct {
         switch (operator_tag) {
             .minus => try self.emitByte(gpa, .op_negate),
             .bang => try self.emitByte(gpa, .op_not),
-            else => return,
+            else => unreachable,
         }
     }
 
@@ -469,7 +454,7 @@ pub const Compiler = struct {
             .minus => try self.emitByte(gpa, .op_subtract),
             .star => try self.emitByte(gpa, .op_multiply),
             .slash => try self.emitByte(gpa, .op_divide),
-            else => {},
+            else => unreachable,
         }
     }
 
@@ -478,7 +463,7 @@ pub const Compiler = struct {
             .keyword_false => try self.emitByte(gpa, .op_false),
             .keyword_nil => try self.emitByte(gpa, .op_nil),
             .keyword_true => try self.emitByte(gpa, .op_true),
-            else => {},
+            else => unreachable,
         }
     }
 
@@ -499,22 +484,41 @@ pub const Compiler = struct {
             try self.identifierConstant(gpa, token);
 
         const is_short = arg_index < 256;
+        const is_assignable = assignable and self.current.tag == .equal;
 
-        var code: Chunk.Code = undefined;
-        if (assignable and self.current.tag == .equal) {
+        if (is_assignable) {
             try self.advance();
             try self.expression(gpa);
-
-            code = if (is_short) .op_set_local else .op_set_local_long;
-            if (local_index == null) {
-                code = if (is_short) .op_set_global else .op_set_global_long;
-            }
-        } else {
-            code = if (is_short) .op_get_local else .op_get_local_long;
-            if (local_index == null) {
-                code = if (is_short) .op_get_global else .op_get_global_long;
-            }
         }
+
+        const code: Chunk.Code = blk: {
+            if (is_assignable and local_index != null) {
+                break :blk if (is_short)
+                    .op_set_local
+                else
+                    .op_set_local_long;
+            }
+
+            if (is_assignable and local_index == null) {
+                break :blk if (is_short)
+                    .op_set_global
+                else
+                    .op_set_global_long;
+            }
+
+            if (!is_assignable and local_index != null) {
+                break :blk if (is_short)
+                    .op_get_local
+                else
+                    .op_get_local_long;
+            }
+
+            break :blk if (is_short)
+                .op_get_global
+            else
+                .op_get_global_long;
+        };
+
         try self.emitByte(gpa, code);
         try self.emitLiteral(gpa, arg_index, token.line);
     }
@@ -593,17 +597,14 @@ pub const Compiler = struct {
         gpa: Allocator,
         value: Value,
     ) (Allocator.Error || Io.Writer.Error)!u32 {
-        // Prevent deduplication for constants.
-        if (value.isString()) {
-            for (self.chunk.constants.items, 0..) |constant, index| {
-                if (constant.isString() and constant.isEqual(value)) {
-                    return @intCast(index);
-                }
-            }
+        // Prevent deduplication for constant values.
+        for (self.chunk.constants.items, 0..) |constant, index| {
+            if (constant.isEqual(value)) return @intCast(index);
         }
 
         const index = try self.chunk.addValue(gpa, value);
         if (index > 16_777_215) { // Update based on constant long.
+            // TODO: Need an error.
             try self.errorAt(self.previous, "Too many constants in one chunk");
             return 0;
         }
