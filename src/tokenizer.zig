@@ -16,6 +16,14 @@ pub const Token = struct {
         return source[start..end];
     }
 
+    pub fn equalLexeme(self: Token, source: [:0]const u8, target: Token) bool {
+        const a = self.lexeme(source);
+        const b = target.lexeme(source);
+
+        if (a.len != b.len) return false;
+        return mem.eql(u8, a, b);
+    }
+
     pub const Tag = enum {
         // Single character tokens.
         l_paren,
