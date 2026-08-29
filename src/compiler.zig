@@ -160,7 +160,7 @@ pub const Compiler = struct {
         const previous_line = self.previous.line;
         try self.consume(.identifier, "Expect variable name.");
 
-        const global_index = try self.parseVariable(gpa);
+        const global_index = try self.parseVariableName(gpa);
 
         if (self.current.tag == .equal) {
             try self.advance();
@@ -173,7 +173,7 @@ pub const Compiler = struct {
         try self.defineVariable(gpa, global_index, previous_line);
     }
 
-    fn parseVariable(self: *Compiler, gpa: Allocator) !u32 {
+    fn parseVariableName(self: *Compiler, gpa: Allocator) !u32 {
         try self.declareVariable();
         if (self.scope.depth > 0) return 0;
 
@@ -209,7 +209,7 @@ pub const Compiler = struct {
     fn defineVariable(self: *Compiler, gpa: Allocator, global_index: u32, line: u32) !void {
         if (self.scope.depth > 0) return self.scope.mark();
 
-        const code: Chunk.Code = if (global_index < 256)
+        const code: Chunk.Code = if (global_index < values.max_u8)
             .op_define_global
         else
             .op_define_global_long;
@@ -385,48 +385,6 @@ pub const Compiler = struct {
         try self.endScope(gpa);
     }
 
-    fn emitLoop(self: *Compiler, gpa: Allocator, loop_start: usize) !void {
-        try self.emitByte(gpa, .op_loop);
-
-        const offset = self.chunk.codes.items.len - loop_start + 2;
-        if (offset > std.math.maxInt(u16)) {
-            try self.errorAt(self.previous, "Loop body too large.");
-        }
-        const truncated: u16 = @truncate(offset);
-
-        var bytes: [2]u8 = undefined;
-        mem.writeInt(u16, &bytes, truncated, .big);
-
-        for (bytes) |byte| {
-            try self.emitByte(gpa, @enumFromInt(byte));
-            // try self.chunk.writeLiteral(gpa, byte, self.previous.line);
-        }
-    }
-
-    fn emitJump(self: *Compiler, gpa: Allocator, instruction: Chunk.Code) !u32 {
-        try self.emitByte(gpa, instruction);
-
-        try self.emitByte(gpa, .op_empty);
-        try self.emitByte(gpa, .op_empty);
-
-        return @intCast(self.chunk.codes.items.len - 2);
-    }
-
-    fn patchJump(self: *Compiler, offset: u32) !void {
-        const jump_index = self.chunk.codes.items.len - offset - 2;
-        if (jump_index > std.math.maxInt(u16)) {
-            try self.errorAt(self.current, "Too much code to jump over.");
-        }
-        const truncated: u16 = @truncate(jump_index);
-
-        var bytes: [2]u8 = undefined;
-        mem.writeInt(u16, &bytes, truncated, .big);
-
-        for (bytes, offset..) |byte, index| {
-            self.chunk.codes.items[index] = byte;
-        }
-    }
-
     fn expression(self: *Compiler, gpa: Allocator) CompilerError!void {
         try self.parsePrecedence(gpa, .assignment);
     }
@@ -436,45 +394,6 @@ pub const Compiler = struct {
             try self.declaration(gpa);
         }
         try self.consume(.r_brace, "Expect '}' after block.");
-    }
-
-    fn beginScope(self: *Compiler) void {
-        self.scope.depth += 1;
-    }
-
-    fn endScope(self: *Compiler, gpa: Allocator) !void {
-        // TODO: Need an error handling if it is being called in global scope.
-        if (self.scope.depth == 0) return;
-        self.scope.depth -= 1;
-
-        while (self.scope.count > 0) : (self.scope.count -= 1) {
-            const local = self.scope.locals[self.scope.count - 1];
-            if (local.depth) |depth| {
-                if (depth <= self.scope.depth) break;
-            }
-            try self.emitByte(gpa, .op_pop);
-        }
-    }
-
-    fn sync(self: *Compiler) CompilerError!void {
-        self.panic_mode = false;
-
-        while (self.current.tag != .eof) {
-            if (self.previous.tag == .keyword_return) return;
-            switch (self.current.tag) {
-                .keyword_class,
-                .keyword_fun,
-                .keyword_var,
-                .keyword_for,
-                .keyword_if,
-                .keyword_while,
-                .keyword_print,
-                .keyword_return,
-                => return,
-                else => {},
-            }
-            try self.advance();
-        }
     }
 
     fn parsePrecedence(self: *Compiler, gpa: Allocator, precedence: Precedence) CompilerError!void {
@@ -515,25 +434,34 @@ pub const Compiler = struct {
         assignable: bool,
     ) CompilerError!void {
         return switch (rule) {
-            .literal => try self.literal(gpa),
-            .number => try self.number(gpa),
-            .string => try self.string(gpa),
+            .literal => try self.parseLiteral(gpa),
+            .number => try self.parseNumber(gpa),
+            .string => try self.parseString(gpa),
             .@"and" => try self.parseAnd(gpa),
             .@"or" => try self.parseOr(gpa),
-            .group => try self.grouping(gpa),
-            .binary => try self.binary(gpa),
-            .unary => try self.unary(gpa),
-            .variable => try self.variable(gpa, assignable),
+            .group => try self.parseGroup(gpa),
+            .binary => try self.parseBinary(gpa),
+            .unary => try self.parseUnary(gpa),
+            .variable => try self.parseVariable(gpa, assignable),
             .null => {},
         };
     }
 
-    fn number(self: *Compiler, gpa: Allocator) !void {
+    fn parseLiteral(self: *Compiler, gpa: Allocator) CompilerError!void {
+        switch (self.previous.tag) {
+            .keyword_false => try self.emitByte(gpa, .op_false),
+            .keyword_nil => try self.emitByte(gpa, .op_nil),
+            .keyword_true => try self.emitByte(gpa, .op_true),
+            else => unreachable,
+        }
+    }
+
+    fn parseNumber(self: *Compiler, gpa: Allocator) !void {
         const value = try fmt.parseFloat(f64, self.previous.lexeme(self.source));
         try self.emitConstant(gpa, .{ .number = value });
     }
 
-    fn string(self: *Compiler, gpa: Allocator) !void {
+    fn parseString(self: *Compiler, gpa: Allocator) !void {
         const lexeme = self.previous.lexeme(self.source);
         const str = lexeme[1 .. lexeme.len - 1];
 
@@ -575,12 +503,12 @@ pub const Compiler = struct {
         try self.patchJump(end_index);
     }
 
-    fn grouping(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn parseGroup(self: *Compiler, gpa: Allocator) CompilerError!void {
         try self.expression(gpa);
         try self.consume(.r_paren, "Expect ')' after expression.");
     }
 
-    fn unary(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn parseUnary(self: *Compiler, gpa: Allocator) CompilerError!void {
         const operator_tag = self.previous.tag;
 
         try self.parsePrecedence(gpa, .unary);
@@ -592,7 +520,7 @@ pub const Compiler = struct {
         }
     }
 
-    fn binary(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn parseBinary(self: *Compiler, gpa: Allocator) CompilerError!void {
         const operator_tag = self.previous.tag;
 
         const rule = rules.get(operator_tag);
@@ -626,16 +554,7 @@ pub const Compiler = struct {
         }
     }
 
-    fn literal(self: *Compiler, gpa: Allocator) CompilerError!void {
-        switch (self.previous.tag) {
-            .keyword_false => try self.emitByte(gpa, .op_false),
-            .keyword_nil => try self.emitByte(gpa, .op_nil),
-            .keyword_true => try self.emitByte(gpa, .op_true),
-            else => unreachable,
-        }
-    }
-
-    fn variable(self: *Compiler, gpa: Allocator, assignable: bool) CompilerError!void {
+    fn parseVariable(self: *Compiler, gpa: Allocator, assignable: bool) CompilerError!void {
         try self.namedVariable(gpa, self.previous, assignable);
     }
 
@@ -651,7 +570,7 @@ pub const Compiler = struct {
         else
             try self.identifierConstant(gpa, token);
 
-        const is_short = arg_index < 256;
+        const is_short = arg_index < values.max_u8;
         const is_assignable = assignable and self.current.tag == .equal;
 
         if (is_assignable) {
@@ -729,6 +648,25 @@ pub const Compiler = struct {
         try self.errorAt(self.current, message);
     }
 
+    fn makeConstant(
+        self: *Compiler,
+        gpa: Allocator,
+        value: Value,
+    ) (Allocator.Error || Io.Writer.Error)!u32 {
+        // Prevent deduplication for constant values.
+        for (self.chunk.constants.items, 0..) |constant, index| {
+            if (constant.isEqual(value)) return @intCast(index);
+        }
+
+        const index = try self.chunk.addValue(gpa, value);
+        if (index > values.max_u24) { // Update based on constant long.
+            // TODO: Need an error.
+            try self.errorAt(self.previous, "Too many constants in one chunk");
+            return 0;
+        }
+        return index;
+    }
+
     fn emitByte(self: *Compiler, gpa: Allocator, code: Chunk.Code) Allocator.Error!void {
         try self.chunk.writeChunk(gpa, code, self.previous.line);
     }
@@ -742,13 +680,55 @@ pub const Compiler = struct {
         try self.chunk.writeConstant(gpa, @intCast(value_index), self.previous.line);
     }
 
+    fn emitJump(self: *Compiler, gpa: Allocator, instruction: Chunk.Code) !u32 {
+        try self.emitByte(gpa, instruction);
+
+        try self.emitByte(gpa, .op_empty);
+        try self.emitByte(gpa, .op_empty);
+
+        return @intCast(self.chunk.codes.items.len - 2);
+    }
+
+    fn patchJump(self: *Compiler, offset: u32) !void {
+        const jump_index = self.chunk.codes.items.len - offset - 2;
+        if (jump_index > values.max_u16) {
+            try self.errorAt(self.current, "Too much code to jump over.");
+        }
+        const truncated: u16 = @truncate(jump_index);
+
+        var bytes: [2]u8 = undefined;
+        mem.writeInt(u16, &bytes, truncated, .big);
+
+        for (bytes, offset..) |byte, index| {
+            self.chunk.codes.items[index] = byte;
+        }
+    }
+
     fn emitLiteral(self: *Compiler, gpa: Allocator, index: u32, line: u32) Allocator.Error!void {
-        if (index < 256) {
+        if (index < values.max_u8) {
             try self.chunk.writeLiteral(gpa, @intCast(index), line);
         } else {
             for (Chunk.trucate3Bytes(index)) |byte| {
                 try self.chunk.writeLiteral(gpa, byte, line);
             }
+        }
+    }
+
+    fn emitLoop(self: *Compiler, gpa: Allocator, loop_start: usize) !void {
+        try self.emitByte(gpa, .op_loop);
+
+        const offset = self.chunk.codes.items.len - loop_start + 2;
+        if (offset > values.max_u16) {
+            try self.errorAt(self.previous, "Loop body too large.");
+        }
+        const truncated: u16 = @truncate(offset);
+
+        var bytes: [2]u8 = undefined;
+        mem.writeInt(u16, &bytes, truncated, .big);
+
+        for (bytes) |byte| {
+            try self.emitByte(gpa, @enumFromInt(byte));
+            // try self.chunk.writeLiteral(gpa, byte, self.previous.line);
         }
     }
 
@@ -760,23 +740,43 @@ pub const Compiler = struct {
         try self.emitReturn(gpa);
     }
 
-    fn makeConstant(
-        self: *Compiler,
-        gpa: Allocator,
-        value: Value,
-    ) (Allocator.Error || Io.Writer.Error)!u32 {
-        // Prevent deduplication for constant values.
-        for (self.chunk.constants.items, 0..) |constant, index| {
-            if (constant.isEqual(value)) return @intCast(index);
-        }
+    fn beginScope(self: *Compiler) void {
+        self.scope.depth += 1;
+    }
 
-        const index = try self.chunk.addValue(gpa, value);
-        if (index > 16_777_215) { // Update based on constant long.
-            // TODO: Need an error.
-            try self.errorAt(self.previous, "Too many constants in one chunk");
-            return 0;
+    fn endScope(self: *Compiler, gpa: Allocator) !void {
+        // TODO: Need an error handling if it is being called in global scope.
+        if (self.scope.depth == 0) return;
+        self.scope.depth -= 1;
+
+        while (self.scope.count > 0) : (self.scope.count -= 1) {
+            const local = self.scope.locals[self.scope.count - 1];
+            if (local.depth) |depth| {
+                if (depth <= self.scope.depth) break;
+            }
+            try self.emitByte(gpa, .op_pop);
         }
-        return index;
+    }
+
+    fn sync(self: *Compiler) CompilerError!void {
+        self.panic_mode = false;
+
+        while (self.current.tag != .eof) {
+            if (self.previous.tag == .keyword_return) return;
+            switch (self.current.tag) {
+                .keyword_class,
+                .keyword_fun,
+                .keyword_var,
+                .keyword_for,
+                .keyword_if,
+                .keyword_while,
+                .keyword_print,
+                .keyword_return,
+                => return,
+                else => {},
+            }
+            try self.advance();
+        }
     }
 
     const rules: RuleList = .initDefault(Rule.empty, .{
@@ -979,6 +979,7 @@ fn testCompile(source: [:0]const u8, expected: []const u8) !void {
 }
 
 const std = @import("std");
+const math = std.math;
 const mem = std.mem;
 const fmt = std.fmt;
 const testing = std.testing;
@@ -992,7 +993,7 @@ const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
 const utils = @import("utils.zig");
 const VM = @import("VM.zig");
-const Strings = utils.Table;
+const Strings = utils.Strings;
 const Object = values.Object;
 const String = values.String;
 const Value = values.Value;

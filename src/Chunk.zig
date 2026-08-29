@@ -132,7 +132,7 @@ pub fn writeConstant(
     value_index: u32,
     line: usize,
 ) Allocator.Error!void {
-    if (value_index > 255) {
+    if (value_index > values.max_u8) {
         const bytes = trucate3Bytes(value_index);
 
         try self.writeChunk(gpa, .op_constant_long, line);
@@ -318,8 +318,8 @@ test "Chunk" {
     const constant_index = try chunk.addValue(gpa, .{ .number = 1.2 });
     try chunk.writeConstant(gpa, constant_index, 123);
 
-    const values = [_]Value{.{ .number = 0 }} ** 256;
-    try chunk.constants.appendSlice(gpa, &values);
+    const constants = [_]Value{.{ .number = 0 }} ** 256;
+    try chunk.constants.appendSlice(gpa, &constants);
 
     try chunk.writeConstant(gpa, @intCast(chunk.constants.items.len - 1), 123);
     try chunk.writeChunk(gpa, .op_return, 123);
@@ -346,4 +346,5 @@ const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
 const Io = std.Io;
 
-const Value = @import("values.zig").Value;
+const values = @import("values.zig");
+const Value = values.Value;

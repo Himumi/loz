@@ -1,5 +1,5 @@
-/// Table does not own the memory.
-pub const Table = std.StringHashMap(*String);
+/// Strings does not own the memory.
+pub const Strings = std.StringHashMap(*String);
 
 pub const Stack = struct {
     /// Store borrowed memory from Chunk or VM's Objects.
@@ -70,7 +70,7 @@ pub const Scope = struct {
     count: u32,
     depth: u32,
 
-    pub const local_max: usize = 65_535;
+    pub const local_max: usize = values.max_u16;
     pub const Local = struct {
         token: Token,
         depth: ?u32,

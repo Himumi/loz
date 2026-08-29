@@ -1,3 +1,7 @@
+pub const max_u8: usize = std.math.maxInt(u8);
+pub const max_u16: usize = std.math.maxInt(u16);
+pub const max_u24: usize = std.math.maxInt(u24);
+
 pub const Value = union(enum) {
     number: f64,
     boolean: bool,
