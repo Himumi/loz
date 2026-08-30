@@ -439,6 +439,11 @@ pub const Compiler = struct {
 
     fn breakStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
         try self.consume(.keyword_break, "Expect 'break'.");
+        if (self.loop_ctx.items.len == 0) {
+            try self.errorAt(self.previous, "Can't use 'break' outside of a loop.");
+            return;
+        }
+
         try self.consume(.semicolon, "Expect ';' after 'break'.");
 
         const loop_ctx = self.loop_ctx.getLast();
@@ -448,6 +453,11 @@ pub const Compiler = struct {
 
     fn continueStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
         try self.consume(.keyword_continue, "Expect 'continue'.");
+        if (self.loop_ctx.items.len == 0) {
+            try self.errorAt(self.previous, "Can't use 'continue' outside of a loop.");
+            return;
+        }
+
         try self.consume(.semicolon, "Expect ';' after 'continue'.");
 
         const loop_ctx = self.loop_ctx.getLast();
