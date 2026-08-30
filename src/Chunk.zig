@@ -133,21 +133,14 @@ pub fn writeConstant(
     line: usize,
 ) Allocator.Error!void {
     if (value_index > values.max_u8) {
-        const bytes = trucate3Bytes(value_index);
-
         try self.writeChunk(gpa, .op_constant_long, line);
-        for (bytes) |byte| {
+        for (utils.writeU24(value_index)) |byte| {
             try self.writeLiteral(gpa, byte, line);
         }
     } else {
         try self.writeChunk(gpa, .op_constant, line);
         try self.writeLiteral(gpa, @intCast(value_index), line);
     }
-}
-
-pub fn trucate3Bytes(index: u32) [3]u8 {
-    const value_24: u24 = @truncate(index);
-    return @bitCast(value_24);
 }
 
 pub fn addValue(self: *Chunk, gpa: Allocator, value: Value) Allocator.Error!u32 {
@@ -346,5 +339,6 @@ const Allocator = mem.Allocator;
 const ArrayList = std.ArrayList;
 const Io = std.Io;
 
+const utils = @import("utils.zig");
 const values = @import("values.zig");
 const Value = values.Value;
