@@ -13,6 +13,24 @@ pub const CompilerError =
     Allocator.Error ||
     Io.Writer.Error;
 
+const LoopContext = struct {
+    continue_index: offset,
+    break_statements: std.ArrayList(offset),
+
+    pub fn init(continue_index: offset) LoopContext {
+        return .{
+            .continue_index = continue_index,
+            .break_statements = .empty,
+        };
+    }
+
+    pub fn deinit(self: *LoopContext, gpa: Allocator) void {
+        self.break_statements.deinit(gpa);
+    }
+
+    const offset = usize;
+};
+
 pub const Compiler = struct {
     /// Borrow from the caller.
     strings: *Strings,
@@ -26,6 +44,8 @@ pub const Compiler = struct {
 
     global_symbols: *std.AutoHashMap(*String, u32),
     scope: utils.Scope,
+    /// Borrow LoopContext from the caller.
+    loop_ctx: *std.ArrayList(*LoopContext),
 
     current: Token,
     previous: Token,
@@ -95,6 +115,7 @@ pub const Compiler = struct {
 
             .scope = .empty,
             .global_symbols = undefined,
+            .loop_ctx = undefined,
 
             .current = undefined,
             .previous = undefined,
@@ -116,12 +137,17 @@ pub const Compiler = struct {
         var global_symbols: std.AutoHashMap(*String, u32) = .init(gpa);
         defer global_symbols.deinit();
 
+        var loop_ctx: std.ArrayList(*LoopContext) = .empty;
+        defer loop_ctx.deinit(gpa);
+
         // Borrow the chunk memory.
         self.chunk = &chunk;
         // Borrow the context memory.
         self.ctx = ctx;
         // Borrow the global_symbols memory.
         self.global_symbols = &global_symbols;
+        // Borrow the loop_ctx memory.
+        self.loop_ctx = &loop_ctx;
 
         // Make sure to false at start up.
         self.had_error = false;
@@ -281,6 +307,8 @@ pub const Compiler = struct {
                 try self.block(gpa);
                 try self.endScope(gpa);
             },
+            .keyword_break => try self.breakStatement(gpa),
+            .keyword_continue => try self.continueStatement(gpa),
             else => try self.expressionStatement(gpa),
         }
     }
@@ -323,6 +351,11 @@ pub const Compiler = struct {
         try self.expression(gpa);
         try self.consume(.r_paren, "Expect ')' after condition.");
 
+        var loop_ctx: LoopContext = .init(loop_start);
+        defer loop_ctx.deinit(gpa);
+
+        try self.loop_ctx.append(gpa, &loop_ctx);
+
         const exit_index = try self.emitJump(gpa, .op_jump_if_false);
         try self.emitByte(gpa, .op_pop);
         try self.statement(gpa);
@@ -330,9 +363,19 @@ pub const Compiler = struct {
 
         try self.patchJump(exit_index);
         try self.emitByte(gpa, .op_pop);
+
+        for (loop_ctx.break_statements.items) |break_index| {
+            try self.patchJump(@intCast(break_index));
+        }
+        _ = self.loop_ctx.pop();
     }
 
     fn forStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        var loop_ctx: LoopContext = .init(undefined);
+        defer loop_ctx.deinit(gpa);
+
+        try self.loop_ctx.append(gpa, &loop_ctx);
+
         self.beginScope();
 
         // 1. Initializer
@@ -352,6 +395,8 @@ pub const Compiler = struct {
         var loop_start = self.chunk.codes.items.len;
         var exit_index: ?u32 = null;
 
+        loop_ctx.continue_index = loop_start;
+
         if (self.current.tag != .semicolon) {
             try self.expression(gpa);
             try self.consume(.semicolon, "Expect ';' after loop condition.");
@@ -364,6 +409,8 @@ pub const Compiler = struct {
         if (self.current.tag != .r_paren) {
             const body_index = try self.emitJump(gpa, .op_jump);
             const increment_start = self.chunk.codes.items.len;
+
+            loop_ctx.continue_index = increment_start;
 
             try self.expression(gpa);
             try self.emitByte(gpa, .op_pop);
@@ -383,6 +430,28 @@ pub const Compiler = struct {
             try self.emitByte(gpa, .op_pop);
         }
         try self.endScope(gpa);
+
+        for (loop_ctx.break_statements.items) |break_index| {
+            try self.patchJump(@intCast(break_index));
+        }
+        _ = self.loop_ctx.pop();
+    }
+
+    fn breakStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        try self.consume(.keyword_break, "Expect 'break'.");
+        try self.consume(.semicolon, "Expect ';' after 'break'.");
+
+        const loop_ctx = self.loop_ctx.getLast();
+        const break_index = try self.emitJump(gpa, .op_jump);
+        try loop_ctx.break_statements.append(gpa, break_index);
+    }
+
+    fn continueStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        try self.consume(.keyword_continue, "Expect 'continue'.");
+        try self.consume(.semicolon, "Expect ';' after 'continue'.");
+
+        const loop_ctx = self.loop_ctx.getLast();
+        try self.emitLoop(gpa, loop_ctx.continue_index);
     }
 
     fn expression(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -694,12 +763,8 @@ pub const Compiler = struct {
         if (jump_index > values.max_u16) {
             try self.errorAt(self.current, "Too much code to jump over.");
         }
-        const truncated: u16 = @truncate(jump_index);
 
-        var bytes: [2]u8 = undefined;
-        mem.writeInt(u16, &bytes, truncated, .big);
-
-        for (bytes, offset..) |byte, index| {
+        for (utils.writeU16(@intCast(jump_index)), offset..) |byte, index| {
             self.chunk.codes.items[index] = byte;
         }
     }
@@ -708,7 +773,7 @@ pub const Compiler = struct {
         if (index < values.max_u8) {
             try self.chunk.writeLiteral(gpa, @intCast(index), line);
         } else {
-            for (Chunk.trucate3Bytes(index)) |byte| {
+            for (utils.writeU24(index)) |byte| {
                 try self.chunk.writeLiteral(gpa, byte, line);
             }
         }
@@ -721,14 +786,9 @@ pub const Compiler = struct {
         if (offset > values.max_u16) {
             try self.errorAt(self.previous, "Loop body too large.");
         }
-        const truncated: u16 = @truncate(offset);
 
-        var bytes: [2]u8 = undefined;
-        mem.writeInt(u16, &bytes, truncated, .big);
-
-        for (bytes) |byte| {
+        for (utils.writeU16(@intCast(offset))) |byte| {
             try self.emitByte(gpa, @enumFromInt(byte));
-            // try self.chunk.writeLiteral(gpa, byte, self.previous.line);
         }
     }
 
@@ -961,6 +1021,41 @@ test "compiler" {
         \\   print i;
         \\ }
     , "01");
+
+    try testCompile(
+        \\ var i = 0;
+        \\ while (i < 2) {
+        \\   print i;
+        \\   i = i + 1;
+        \\   break;
+        \\ }
+    , "0");
+
+    try testCompile(
+        \\ var i = 0;
+        \\ while (i < 2) {
+        \\   if (i == 0) {
+        \\     i = i + 1;
+        \\     continue;
+        \\   }
+        \\   print i;
+        \\   i = i + 1;
+        \\ }
+    , "1");
+
+    try testCompile(
+        \\ for (var i = 0; i < 2; i = i + 1) {
+        \\   print i;
+        \\   if (i == 0) break;
+        \\ }
+    , "0");
+
+    try testCompile(
+        \\ for (var i = 0; i < 2; i = i + 1) {
+        \\   if (i == 0) continue;
+        \\   print i;
+        \\ }
+    , "1");
 }
 
 fn testCompile(source: [:0]const u8, expected: []const u8) !void {

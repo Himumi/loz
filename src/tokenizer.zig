@@ -71,6 +71,8 @@ pub const Token = struct {
         keyword_true,
         keyword_var,
         keyword_while,
+        keyword_break,
+        keyword_continue,
 
         invalid,
         eof,
@@ -123,6 +125,8 @@ pub const Token = struct {
                 .keyword_true => "true",
                 .keyword_var => "var",
                 .keyword_while => "while",
+                .keyword_break => "break",
+                .keyword_continue => "continue",
             };
         }
 
@@ -155,6 +159,8 @@ pub const Token = struct {
         .{ "true", .keyword_true },
         .{ "var", .keyword_var },
         .{ "while", .keyword_while },
+        .{ "break", .keyword_break },
+        .{ "continue", .keyword_continue },
     });
 
     pub fn getKeyword(input: []const u8) ?Tag {
@@ -164,7 +170,17 @@ pub const Token = struct {
     pub fn matchKeyword(input: []const u8) ?Tag {
         switch (input[0]) {
             'a' => return checkKeyword(input[1..], "nd", .keyword_and),
-            'c' => return checkKeyword(input[1..], "lass", .keyword_class),
+            'b' => return checkKeyword(input[1..], "reak", .keyword_break),
+            'c' => {
+                if (input.len > 1) {
+                    switch (input[1]) {
+                        'l' => return checkKeyword(input[2..], "ass", .keyword_class),
+                        'o' => return checkKeyword(input[2..], "ntinue", .keyword_continue),
+                        else => {},
+                    }
+                }
+                return checkKeyword(input[1..], "lass", .keyword_class);
+            },
             'e' => return checkKeyword(input[1..], "lse", .keyword_else),
             'f' => {
                 if (input.len > 1) {
@@ -225,6 +241,8 @@ test "matchKeyword" {
     try testMatchKeyword("var", .keyword_var);
     try testMatchKeyword("while", .keyword_while);
     try testMatchKeyword("name", .identifier);
+    try testMatchKeyword("break", .keyword_break);
+    try testMatchKeyword("continue", .keyword_continue);
 }
 
 fn testMatchKeyword(input: []const u8, expected: Token.Tag) !void {
@@ -571,6 +589,8 @@ test "succeeds scanner" {
     try testScanner("true", 2, "true EOF");
     try testScanner("var", 2, "var EOF");
     try testScanner("while", 2, "while EOF");
+    try testScanner("break", 2, "break EOF");
+    try testScanner("continue", 2, "continue EOF");
     try testScanner("identifier", 2, "identifier EOF");
     try testScanner("123", 2, "123 EOF");
     try testScanner("1.23", 2, "1.23 EOF");
