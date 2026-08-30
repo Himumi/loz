@@ -109,6 +109,24 @@ pub const Scope = struct {
     }
 };
 
+pub fn writeU16(index: u32) [2]u8 {
+    const truncated: u16 = @truncate(index);
+
+    var bytes: [2]u8 = undefined;
+    mem.writeInt(u16, &bytes, truncated, .big);
+
+    return bytes;
+}
+
+pub fn writeU24(index: u32) [3]u8 {
+    const truncated: u24 = @truncate(index);
+
+    var bytes: [3]u8 = undefined;
+    mem.writeInt(u24, &bytes, truncated, .big);
+
+    return bytes;
+}
+
 const std = @import("std");
 const mem = std.mem;
 
