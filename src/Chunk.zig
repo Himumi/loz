@@ -214,7 +214,6 @@ pub fn getShort(codes: []const Byte, offset: usize) u32 {
     return mem.readInt(u16, bytes[0..2], .big);
 }
 
-/// BUG: getLine is broken makes the diassaemble function to not work.
 pub fn getLine(lines: []const Line, instruction_offset: usize) ?usize {
     var accumulator: usize = 0;
 
@@ -227,7 +226,6 @@ pub fn getLine(lines: []const Line, instruction_offset: usize) ?usize {
     return null;
 }
 
-/// BUG: printLine is broken makes the diassaemble function to not work.
 fn printLine(writer: *Io.Writer, lines: []const Line, offset: usize) Io.Writer.Error!void {
     if (getLine(lines, offset)) |line| {
         if (offset > 0) {
@@ -241,7 +239,6 @@ fn printLine(writer: *Io.Writer, lines: []const Line, offset: usize) Io.Writer.E
 }
 
 /// For debugging purpose.
-/// BUG: diassaemble is broken.
 pub fn disassemble(self: Chunk, writer: *Io.Writer, name: []const u8) Io.Writer.Error!void {
     try writer.print("== {s} ==\n", .{name});
 
