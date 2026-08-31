@@ -325,6 +325,136 @@ fn runtimeError(self: *VM, writer: *Io.Writer, comptime fmt: []const u8, args: a
 //    -> (3 - 2 - 1) => (3, 2, subtract, 1, subtract)
 //    -> (1 + 2 * 3 - 4 / -5) => (3, 2, multiply, 1, add, 4, 5, negate, divide, subtract)
 
+test "VM" {
+    try testCompile("print (1 + 2) * 3;", "9");
+    try testCompile("print 1 + 2 * 3;", "7");
+    try testCompile("print 10 - 5 / 1;", "5");
+    try testCompile("print true;", "true");
+    try testCompile("print false;", "false");
+    try testCompile("print nil;", "nil");
+    try testCompile("print !true;", "false");
+    try testCompile("print !false;", "true");
+    try testCompile("print !nil;", "true");
+    try testCompile("print !10;", "false");
+    try testCompile("print 10 == 10;", "true");
+    try testCompile("print 10 != 10;", "false");
+    try testCompile("print 10 < 10;", "false");
+    try testCompile("print 10 <= 10;", "true");
+    try testCompile("print 10 > 10;", "false");
+    try testCompile("print 10 >= 10;", "true");
+    try testCompile("print !(5 - 4 > 3 * 2 == !nil);", "true");
+    try testCompile(
+        \\ print "hello";
+    , "hello");
+
+    try testCompile(
+        \\ print "hello, " + "world!";
+    , "hello, world!");
+
+    try testCompile(
+        \\ print "hello" == "hello";
+    , "true");
+    try testCompile(
+        \\ print "hello" == "world";
+    , "false");
+
+    try testCompile(
+        \\ var name = "John";
+        \\ print "Hello " + name;
+    , "Hello John");
+
+    try testCompile(
+        \\ var name;
+        \\ name = "John";
+        \\ print name;
+    , "John");
+
+    try testCompile(
+        \\ var breakfast = "beignets";
+        \\ var beverage = "cafe au lait";
+        \\ breakfast = "beignets with " + beverage;
+        \\
+        \\ print breakfast;
+    , "beignets with cafe au lait");
+
+    try testCompile(
+        \\ var name = "John";
+        \\ { name = "lua"; }
+        \\ print name;
+    , "lua");
+
+    try testCompile(
+        \\ if (false) print "true"; else print "false";
+    , "false");
+
+    try testCompile("print true and true;", "true");
+    try testCompile("print false or true;", "true");
+
+    try testCompile(
+        \\ var i = 0;
+        \\ while (i < 2) {
+        \\   print i;
+        \\   i = i + 1;
+        \\ }
+    , "01");
+
+    try testCompile(
+        \\ for (var i = 0; i < 2; i = i + 1) {
+        \\   print i;
+        \\ }
+    , "01");
+
+    try testCompile(
+        \\ var i = 0;
+        \\ while (i < 2) {
+        \\   print i;
+        \\   i = i + 1;
+        \\   break;
+        \\ }
+    , "0");
+
+    try testCompile(
+        \\ var i = 0;
+        \\ while (i < 2) {
+        \\   if (i == 0) {
+        \\     i = i + 1;
+        \\     continue;
+        \\   }
+        \\   print i;
+        \\   i = i + 1;
+        \\ }
+    , "1");
+
+    try testCompile(
+        \\ for (var i = 0; i < 2; i = i + 1) {
+        \\   print i;
+        \\   if (i == 0) break;
+        \\ }
+    , "0");
+
+    try testCompile(
+        \\ for (var i = 0; i < 2; i = i + 1) {
+        \\   if (i == 0) continue;
+        \\   print i;
+        \\ }
+    , "1");
+}
+
+fn testCompile(source: [:0]const u8, expected: []const u8) !void {
+    const gpa = testing.allocator;
+
+    var stream: Io.Writer.Allocating = .init(gpa);
+    defer stream.deinit();
+
+    var ctx: Context = .init(undefined, .{ .out = &stream.writer, .err = &stream.writer });
+
+    var vm: VM = try .initCapacity(gpa, 256);
+    defer vm.deinit(gpa);
+
+    try vm.interpret(gpa, &ctx, source);
+    try testing.expectEqualSlices(u8, expected, stream.written());
+}
+
 const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
