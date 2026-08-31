@@ -4,8 +4,9 @@ pub fn compile(
     strings: *Strings,
     source: [:0]const u8,
 ) CompilerError!Chunk {
-    var compiler: Compiler = .init(source, strings);
-    return try compiler.compile(gpa, ctx);
+    var compiler: Compiler = .init(gpa, source);
+    defer compiler.deinit(gpa);
+    return try compiler.compile(gpa, ctx, strings);
 }
 
 pub const CompilerError =
@@ -33,19 +34,18 @@ const LoopContext = struct {
 
 pub const Compiler = struct {
     /// Borrow from the caller.
-    strings: *Strings,
-    /// Borrow from the caller.
     source: [:0]const u8,
+    /// Borrow from the caller.
+    strings: *Strings,
     /// Borrow from the caller.
     ctx: *Context,
     /// Borrow from the caller.
     chunk: *Chunk.Builder,
-    scanner: Scanner,
 
-    global_symbols: *std.AutoHashMap(*String, u32),
+    global_symbols: std.AutoHashMap(*String, u32),
+    loop_ctx: std.ArrayList(*LoopContext),
+    scanner: Scanner,
     scope: utils.Scope,
-    /// Borrow LoopContext from the caller.
-    loop_ctx: *std.ArrayList(*LoopContext),
 
     current: Token,
     previous: Token,
@@ -104,18 +104,18 @@ pub const Compiler = struct {
 
     const RuleList = std.EnumArray(Token.Tag, Rule);
 
-    pub fn init(source: [:0]const u8, strings: *Strings) Compiler {
+    pub fn init(gpa: Allocator, source: [:0]const u8) Compiler {
         return .{
-            .strings = strings,
             .source = source,
             .ctx = undefined,
+            .strings = undefined,
 
             .chunk = undefined,
             .scanner = .init(source),
 
             .scope = .empty,
-            .global_symbols = undefined,
-            .loop_ctx = undefined,
+            .global_symbols = .init(gpa),
+            .loop_ctx = .empty,
 
             .current = undefined,
             .previous = undefined,
@@ -125,29 +125,27 @@ pub const Compiler = struct {
         };
     }
 
+    pub fn deinit(self: *Compiler, gpa: Allocator) void {
+        self.global_symbols.deinit();
+        self.loop_ctx.deinit(gpa);
+    }
+
     pub fn compile(
         self: *Compiler,
         gpa: Allocator,
         ctx: *Context,
+        strings: *Strings,
     ) CompilerError!Chunk {
         // Initialize the chunk here to prevent mismatching memory ownership.
         var chunk: Chunk.Builder = .empty;
         defer chunk.deinit(gpa);
 
-        var global_symbols: std.AutoHashMap(*String, u32) = .init(gpa);
-        defer global_symbols.deinit();
-
-        var loop_ctx: std.ArrayList(*LoopContext) = .empty;
-        defer loop_ctx.deinit(gpa);
-
         // Borrow the chunk memory.
         self.chunk = &chunk;
         // Borrow the context memory.
         self.ctx = ctx;
-        // Borrow the global_symbols memory.
-        self.global_symbols = &global_symbols;
-        // Borrow the loop_ctx memory.
-        self.loop_ctx = &loop_ctx;
+        // Borrow the Strings memory.
+        self.strings = strings;
 
         // Make sure to false at start up.
         self.had_error = false;
