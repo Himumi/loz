@@ -61,7 +61,7 @@ pub fn interpret(self: *VM, gpa: Allocator, ctx: *Context, source: [:0]const u8)
 }
 
 pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
-    while (self.ip < self.chunk.codes.items.len) {
+    while (self.ip < self.chunk.codes.len) {
         // Uncomment for debugging.
         // try self.dumpStack(ctx.stream.err);
         // try self.chunk.disassembleInstruction(ctx.stream.err, self.ip);
@@ -164,24 +164,24 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
 }
 
 fn readByte(self: *VM) u8 {
-    const ip = self.chunk.codes.items[self.ip];
+    const ip = self.chunk.codes[self.ip];
     self.ip += 1;
     return ip;
 }
 
 fn readConstant(self: *VM) Value {
     const index: usize = @intCast(self.readByte());
-    return self.chunk.constants.items[index];
+    return self.chunk.constants[index];
 }
 
 fn readConstantLong(self: *VM) Value {
-    const index = self.chunk.getConstantLong(self.ip);
+    const index = Chunk.getConstantLong(self.chunk.codes, self.ip);
     self.ip += 3;
-    return self.chunk.constants.items[@intCast(index)];
+    return self.chunk.constants[@intCast(index)];
 }
 
 fn readShort(self: *VM) u32 {
-    const bytes = self.chunk.codes.items[self.ip .. self.ip + 2];
+    const bytes = self.chunk.codes[self.ip .. self.ip + 2];
     const index = mem.readInt(u16, bytes[0..2], .big);
     self.ip += 2;
     return index;
@@ -192,7 +192,7 @@ fn readIndex(self: *VM) u32 {
 }
 
 fn readIndexLong(self: *VM) u32 {
-    const index = self.chunk.getConstantLong(self.ip);
+    const index = Chunk.getConstantLong(self.chunk.codes, self.ip);
     self.ip += 3;
     return index;
 }
@@ -313,7 +313,7 @@ fn runtimeError(self: *VM, writer: *Io.Writer, comptime fmt: []const u8, args: a
     try writer.print(fmt, args);
     try writer.writeByte('\n');
 
-    const line = self.chunk.getLine(self.ip) orelse 0;
+    const line = Chunk.getLine(self.chunk.lines, self.ip) orelse 0;
     try writer.print("[line {}] in script.\n", .{line});
 }
 

@@ -5,7 +5,7 @@ pub fn compile(
     source: [:0]const u8,
 ) CompilerError!Chunk {
     var compiler: Compiler = .init(source, strings);
-    return compiler.compile(gpa, ctx);
+    return try compiler.compile(gpa, ctx);
 }
 
 pub const CompilerError =
@@ -39,7 +39,7 @@ pub const Compiler = struct {
     /// Borrow from the caller.
     ctx: *Context,
     /// Borrow from the caller.
-    chunk: *Chunk,
+    chunk: *Chunk.Builder,
     scanner: Scanner,
 
     global_symbols: *std.AutoHashMap(*String, u32),
@@ -131,8 +131,8 @@ pub const Compiler = struct {
         ctx: *Context,
     ) CompilerError!Chunk {
         // Initialize the chunk here to prevent mismatching memory ownership.
-        var chunk: Chunk = .empty;
-        errdefer chunk.deinit(gpa);
+        var chunk: Chunk.Builder = .empty;
+        defer chunk.deinit(gpa);
 
         var global_symbols: std.AutoHashMap(*String, u32) = .init(gpa);
         defer global_symbols.deinit();
@@ -167,7 +167,7 @@ pub const Compiler = struct {
         // }
 
         // The caller ownes the ownership.
-        return chunk;
+        return try chunk.toOwnedSlice(gpa);
     }
 
     fn declaration(self: *Compiler, gpa: Allocator) CompilerError!void {
