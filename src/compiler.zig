@@ -344,6 +344,7 @@ pub const Compiler = struct {
     }
 
     fn whileStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+        // Condition
         const loop_start = self.chunk.codes.items.len;
         try self.consume(.l_paren, "Expect '(' after 'while'.");
         try self.expression(gpa);
@@ -356,12 +357,15 @@ pub const Compiler = struct {
 
         const exit_index = try self.emitJump(gpa, .op_jump_if_false);
         try self.emitByte(gpa, .op_pop);
+
+        // Statement Body.
         try self.statement(gpa);
         try self.emitLoop(gpa, loop_start);
 
         try self.patchJump(exit_index);
         try self.emitByte(gpa, .op_pop);
 
+        // Patch the 'break' statements.
         for (loop_ctx.break_statements.items) |break_index| {
             try self.patchJump(@intCast(break_index));
         }
@@ -373,15 +377,12 @@ pub const Compiler = struct {
         defer loop_ctx.deinit(gpa);
 
         try self.loop_ctx.append(gpa, &loop_ctx);
-
         self.beginScope();
 
-        // 1. Initializer
+        // Initializer
         try self.consume(.l_paren, "Expect '(' after 'for'.");
         switch (self.current.tag) {
-            .semicolon => {
-                try self.advance();
-            },
+            .semicolon => try self.advance(),
             .keyword_var => {
                 try self.advance();
                 try self.varDeclaration(gpa);
@@ -389,7 +390,7 @@ pub const Compiler = struct {
             else => try self.expressionStatement(gpa),
         }
 
-        // 2. Condition
+        // Condition
         var loop_start = self.chunk.codes.items.len;
         var exit_index: ?u32 = null;
 
@@ -403,7 +404,7 @@ pub const Compiler = struct {
             try self.emitByte(gpa, .op_pop);
         }
 
-        // 3. Increment Clause
+        // Increment Clause
         if (self.current.tag != .r_paren) {
             const body_index = try self.emitJump(gpa, .op_jump);
             const increment_start = self.chunk.codes.items.len;
@@ -412,14 +413,17 @@ pub const Compiler = struct {
 
             try self.expression(gpa);
             try self.emitByte(gpa, .op_pop);
+
             try self.consume(.r_paren, "Expect ')' after for clauses.");
 
             try self.emitLoop(gpa, loop_start);
-            loop_start = increment_start;
             try self.patchJump(body_index);
+
+            // Set the loop starting point to increment part.
+            loop_start = increment_start;
         }
 
-        // 4. Statement Body
+        // Statement Body
         try self.statement(gpa);
         try self.emitLoop(gpa, loop_start);
 
@@ -429,6 +433,7 @@ pub const Compiler = struct {
         }
         try self.endScope(gpa);
 
+        // Patch the 'break' statements.
         for (loop_ctx.break_statements.items) |break_index| {
             try self.patchJump(@intCast(break_index));
         }
@@ -438,24 +443,22 @@ pub const Compiler = struct {
     fn breakStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
         try self.consume(.keyword_break, "Expect 'break'.");
         if (self.loop_ctx.items.len == 0) {
-            try self.errorAt(self.previous, "Can't use 'break' outside of a loop.");
-            return;
+            return try self.errorAt(self.previous, "Can't use 'break' outside of a loop.");
         }
 
         try self.consume(.semicolon, "Expect ';' after 'break'.");
-
         const loop_ctx = self.loop_ctx.getLast();
+
         const break_index = try self.emitJump(gpa, .op_jump);
         try loop_ctx.break_statements.append(gpa, break_index);
     }
 
     fn continueStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
         try self.consume(.keyword_continue, "Expect 'continue'.");
-        if (self.loop_ctx.items.len == 0) {
-            try self.errorAt(self.previous, "Can't use 'continue' outside of a loop.");
-            return;
-        }
 
+        if (self.loop_ctx.items.len == 0) {
+            return try self.errorAt(self.previous, "Can't use 'continue' outside of a loop.");
+        }
         try self.consume(.semicolon, "Expect ';' after 'continue'.");
 
         const loop_ctx = self.loop_ctx.getLast();
@@ -478,8 +481,7 @@ pub const Compiler = struct {
 
         const prefix_rule = rules.get(self.previous.tag).prefix;
         if (prefix_rule == .null) {
-            try self.errorAt(self.previous, "Expect Expression.");
-            return error.ExpectedExpression;
+            return try self.errorAt(self.previous, "Expect Expression.");
         }
 
         const prece_int = @intFromEnum(precedence);
@@ -489,7 +491,8 @@ pub const Compiler = struct {
         try self.parseRule(gpa, prefix_rule, assignable);
 
         while (true) {
-            const curr_prece_int = @intFromEnum(rules.get(self.current.tag).precedence);
+            const curr_prece = rules.get(self.current.tag).precedence;
+            const curr_prece_int = @intFromEnum(curr_prece);
 
             if (prece_int > curr_prece_int) break;
             try self.advance();
@@ -510,7 +513,7 @@ pub const Compiler = struct {
         rule: Rule.Kind,
         assignable: bool,
     ) CompilerError!void {
-        return switch (rule) {
+        switch (rule) {
             .literal => try self.parseLiteral(gpa),
             .number => try self.parseNumber(gpa),
             .string => try self.parseString(gpa),
@@ -521,7 +524,7 @@ pub const Compiler = struct {
             .unary => try self.parseUnary(gpa),
             .variable => try self.parseVariable(gpa, assignable),
             .null => {},
-        };
+        }
     }
 
     fn parseLiteral(self: *Compiler, gpa: Allocator) CompilerError!void {
@@ -589,7 +592,6 @@ pub const Compiler = struct {
         const operator_tag = self.previous.tag;
 
         try self.parsePrecedence(gpa, .unary);
-
         switch (operator_tag) {
             .minus => try self.emitByte(gpa, .op_negate),
             .bang => try self.emitByte(gpa, .op_not),
@@ -961,11 +963,10 @@ const Allocator = mem.Allocator;
 const Io = std.Io;
 
 const tokenizer = @import("tokenizer.zig");
+const utils = @import("utils.zig");
 const values = @import("values.zig");
 const Chunk = @import("Chunk.zig");
 const Context = @import("Context.zig");
-const utils = @import("utils.zig");
-const VM = @import("VM.zig");
 const Strings = utils.Strings;
 const Object = values.Object;
 const String = values.String;
