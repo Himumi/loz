@@ -74,24 +74,50 @@ pub fn run(self: *VM, ctx: *Context) VMError!void {
 
         const code: Chunk.Code = @enumFromInt(self.readByte());
         switch (code) {
-            .op_constant => try self.stack.push(gpa, self.readConstant()),
-            .op_constant_long => try self.stack.push(gpa, self.readConstantLong()),
-            .op_nil => try self.stack.push(gpa, .nil),
-            .op_true => try self.stack.push(gpa, .{ .boolean = true }),
-            .op_false => try self.stack.push(gpa, .{ .boolean = false }),
-            .op_equal => {
-                const b = self.stack.store.pop() orelse return error.UndefinedValue;
-                const a = self.stack.store.pop() orelse return error.UndefinedValue;
-                try self.stack.push(gpa, .{ .boolean = a.isEqual(b) });
+            .op_constant => {
+                try self.stack.push(gpa, self.readConstant());
             },
-            .op_greater => try self.binaryOperation(ctx, .op_greater),
-            .op_less => try self.binaryOperation(ctx, .op_less),
-            .op_add => try self.addOperation(ctx),
-            .op_subtract => try self.binaryOperation(ctx, .op_subtract),
-            .op_multiply => try self.binaryOperation(ctx, .op_multiply),
-            .op_divide => try self.binaryOperation(ctx, .op_divide),
-            .op_not => try self.notOperation(),
-            .op_negate => try self.negateOperation(ctx),
+            .op_constant_long => {
+                try self.stack.push(gpa, self.readConstantLong());
+            },
+            .op_nil => {
+                try self.stack.push(gpa, .nil);
+            },
+            .op_true => {
+                try self.stack.push(gpa, .{ .boolean = true });
+            },
+            .op_false => {
+                try self.stack.push(gpa, .{ .boolean = false });
+            },
+            .op_equal => {
+                const right = self.stack.store.pop() orelse return error.UndefinedValue;
+                const left = self.stack.store.pop() orelse return error.UndefinedValue;
+                try self.stack.push(gpa, .{ .boolean = left.isEqual(right) });
+            },
+            .op_greater => {
+                try self.binaryOperation(ctx, .op_greater);
+            },
+            .op_less => {
+                try self.binaryOperation(ctx, .op_less);
+            },
+            .op_add => {
+                try self.addOperation(ctx);
+            },
+            .op_subtract => {
+                try self.binaryOperation(ctx, .op_subtract);
+            },
+            .op_multiply => {
+                try self.binaryOperation(ctx, .op_multiply);
+            },
+            .op_divide => {
+                try self.binaryOperation(ctx, .op_divide);
+            },
+            .op_not => {
+                try self.notOperation();
+            },
+            .op_negate => {
+                try self.negateOperation(ctx);
+            },
             .op_return => {
                 // Exit interpreter
             },
@@ -113,56 +139,50 @@ pub fn run(self: *VM, ctx: *Context) VMError!void {
                 const value = self.stack.pop() orelse return error.UndefinedValue;
                 try value.print(ctx.stream.out);
             },
-            .op_pop => _ = self.stack.pop() orelse return error.UndefinedValue,
-            .op_define_global => try self.defineVariable(self.readIndex()),
-            .op_define_global_long => try self.defineVariable(self.readIndexLong()),
+            .op_pop => {
+                _ = self.stack.pop() orelse return error.UndefinedValue;
+            },
+            .op_define_global => {
+                try self.defineVariable(self.readIndex());
+            },
+            .op_define_global_long => {
+                try self.defineVariable(self.readIndexLong());
+            },
             .op_get_global => {
                 const index = self.readIndex();
-                if (index >= self.globals.items.len) {
-                    try self.runtimeError(ctx.stream.err, "Undefined Variable.", .{});
-                    return error.UndefinedValue;
-                }
-                try self.stack.push(gpa, self.globals.items[@intCast(index)]);
+                try self.getVariable(ctx, index);
             },
             .op_get_global_long => {
                 const index = self.readIndexLong();
-                if (index >= self.globals.items.len) {
-                    try self.runtimeError(ctx.stream.err, "Undefined Variable.", .{});
-                    return error.UndefinedValue;
-                }
-                try self.stack.push(gpa, self.globals.items[@intCast(index)]);
+                try self.getVariable(ctx, index);
             },
             .op_set_global => {
                 const index = self.readIndex();
-                if (index >= self.globals.items.len) {
-                    try self.runtimeError(ctx.stream.err, "Undefined Variable.", .{});
-                    return error.UndefinedValue;
-                }
-                self.globals.items[@intCast(index)] = self.stack.peek();
+                try self.setVariable(ctx, index);
             },
             .op_set_global_long => {
                 const index = self.readIndexLong();
-                if (index >= self.globals.items.len) {
-                    try self.runtimeError(ctx.stream.err, "Undefined Variable.", .{});
-                    return error.UndefinedValue;
-                }
-                self.globals.items[@intCast(index)] = self.stack.peek();
+                try self.setVariable(ctx, index);
             },
             .op_get_local => {
                 const index = self.readIndex();
-                try self.stack.push(gpa, self.stack.store.items[@intCast(index)]);
+                const value = self.stack.get(index) orelse return error.UndefinedValue;
+                try self.stack.push(gpa, value);
             },
             .op_get_local_long => {
                 const index = self.readIndexLong();
-                try self.stack.push(gpa, self.stack.store.items[@intCast(index)]);
+                const value = self.stack.get(index) orelse return error.UndefinedValue;
+                try self.stack.push(gpa, value);
             },
             .op_set_local => {
                 const index = self.readIndex();
-                self.stack.store.items[@intCast(index)] = self.stack.peek();
+                const value = self.stack.peek();
+                self.stack.set(index, value);
             },
             .op_set_local_long => {
                 const index = self.readIndexLong();
-                self.stack.store.items[@intCast(index)] = self.stack.peek();
+                const value = self.stack.peek();
+                self.stack.set(index, value);
             },
             else => return error.InvalidOperation,
         }
@@ -204,12 +224,13 @@ fn readIndexLong(self: *VM) u32 {
 }
 
 fn addOperation(self: *VM, ctx: *Context) !void {
-    const b = self.stack.get(self.stack.len() - 1) orelse return error.UndefinedValue;
-    const a = self.stack.get(self.stack.len() - 2) orelse return error.UndefinedValue;
+    const len = self.stack.len();
+    const right = self.stack.get(len - 1) orelse return error.UndefinedValue;
+    const left = self.stack.get(len - 2) orelse return error.UndefinedValue;
 
-    if (b.isString() and a.isString()) {
+    if (left.isString() and right.isString()) {
         try self.concatenate();
-    } else if (b.isNumber() and a.isNumber()) {
+    } else if (left.isNumber() and right.isNumber()) {
         try self.binaryOperation(ctx, .op_add);
     } else {
         try self.runtimeError(ctx.stream.err, "Invalid Operands Type.", .{});
@@ -218,25 +239,21 @@ fn addOperation(self: *VM, ctx: *Context) !void {
 }
 
 fn binaryOperation(self: *VM, ctx: *Context, code: Chunk.Code) !void {
-    const b = self.stack.pop() orelse return error.UndefinedValue;
-    if (!b.isNumber()) {
-        try self.runtimeError(ctx.stream.err, "Operand must be a number.", .{});
-        return error.OperandMustBeNumber;
-    }
+    const right = self.stack.pop() orelse return error.UndefinedValue;
+    const left = self.stack.pop() orelse return error.UndefinedValue;
 
-    const a = self.stack.pop() orelse return error.UndefinedValue;
-    if (!a.isNumber()) {
+    if (!left.isSame(right) or !left.isNumber()) {
         try self.runtimeError(ctx.stream.err, "Operand must be a number.", .{});
         return error.OperandMustBeNumber;
     }
 
     const result: Value = switch (code) {
-        .op_add => .{ .number = a.number + b.number },
-        .op_subtract => .{ .number = a.number - b.number },
-        .op_multiply => .{ .number = a.number * b.number },
-        .op_divide => .{ .number = a.number / b.number },
-        .op_greater => .{ .boolean = a.number > b.number },
-        .op_less => .{ .boolean = a.number < b.number },
+        .op_add => .{ .number = left.number + right.number },
+        .op_subtract => .{ .number = left.number - right.number },
+        .op_multiply => .{ .number = left.number * right.number },
+        .op_divide => .{ .number = left.number / right.number },
+        .op_greater => .{ .boolean = left.number > right.number },
+        .op_less => .{ .boolean = left.number < right.number },
         else => {
             try self.runtimeError(ctx.stream.err, "Invalid Binary Operation", .{});
             return error.InvalidBinaryOperation;
@@ -245,26 +262,24 @@ fn binaryOperation(self: *VM, ctx: *Context, code: Chunk.Code) !void {
     try self.stack.push(self.allocator, result);
 }
 
-fn negateOperation(self: *VM, ctx: *Context) !void {
-    if (self.stack.len() == 0) return error.UndefinedValue;
-
-    const last = self.stack.peek();
-    if (last != .number) {
-        try self.runtimeError(ctx.stream.err, "Operand must be a number", .{});
-        return error.OperandMustBeNumber;
-    }
-
-    const last_index = self.stack.last() orelse unreachable;
-    self.stack.set(last_index, .{ .number = -(last.number) });
-}
-
 fn notOperation(self: *VM) !void {
     if (self.stack.len() == 0) return error.UndefinedValue;
 
-    const last = self.stack.peek();
-    const last_index = self.stack.last() orelse unreachable;
+    const index = self.stack.last() orelse unreachable;
+    const value = self.stack.peek();
+    self.stack.set(index, .{ .boolean = value.isFalsey() });
+}
 
-    self.stack.set(last_index, .{ .boolean = last.isFalsey() });
+fn negateOperation(self: *VM, ctx: *Context) !void {
+    if (self.stack.len() == 0) return error.UndefinedValue;
+
+    const index = self.stack.last() orelse unreachable;
+    const value = self.stack.peek();
+    if (value != .number) {
+        try self.runtimeError(ctx.stream.err, "Operand must be a number", .{});
+        return error.OperandMustBeNumber;
+    }
+    self.stack.set(index, .{ .number = -(value.number) });
 }
 
 fn defineVariable(self: *VM, index: u32) !void {
@@ -276,17 +291,36 @@ fn defineVariable(self: *VM, index: u32) !void {
     _ = self.stack.pop() orelse return error.UndefinedValue;
 }
 
+fn getVariable(self: *VM, ctx: *Context, index: u32) !void {
+    if (index >= self.globals.items.len) {
+        try self.runtimeError(ctx.stream.err, "Undefined Variable.", .{});
+        return error.UndefinedValue;
+    }
+    try self.stack.push(self.allocator, self.globals.items[@intCast(index)]);
+}
+
+fn setVariable(self: *VM, ctx: *Context, index: u32) !void {
+    if (index >= self.globals.items.len) {
+        try self.runtimeError(ctx.stream.err, "Undefined Variable.", .{});
+        return error.UndefinedValue;
+    }
+    self.globals.items[@intCast(index)] = self.stack.peek();
+}
+
 fn concatenate(self: *VM) !void {
     // It does not own the ownership.
-    const b = self.stack.pop() orelse return error.UndefinedValue;
+    const right = self.stack.pop() orelse return error.UndefinedValue;
     // It does not own the ownership.
-    const a = self.stack.pop() orelse return error.UndefinedValue;
+    const left = self.stack.pop() orelse return error.UndefinedValue;
 
-    if (b.isString() and a.isString()) {
-        const a_str = a.object.getParentPtr(String);
-        const b_str = b.object.getParentPtr(String);
+    if (right.isString() and left.isString()) {
+        const left_str = left.object.getParentPtr(String);
+        const right_str = right.object.getParentPtr(String);
 
-        const concat = try mem.concat(self.allocator, u8, &.{ a_str.slice(), b_str.slice() });
+        const concat = try mem.concat(self.allocator, u8, &.{
+            left_str.slice(),
+            right_str.slice(),
+        });
         errdefer self.allocator.free(concat);
 
         const gop = try self.strings.getOrPut(concat);
