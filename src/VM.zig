@@ -25,6 +25,17 @@ pub const RuntimeError = error{
     OperandMustBeNumber,
 };
 
+fn errorMessage(err: VMError) ![]const u8 {
+    return switch (err) {
+        error.EmptyStack => "Empty Stack",
+        error.InvalidOperation => "Invalid Operation",
+        error.InvalidBinaryOperation => "Invalid Binary Operation",
+        error.UndefinedValue => "Undefined Value",
+        error.OperandMustBeNumber => "Operand Must Be a Number",
+        else => err,
+    };
+}
+
 pub fn init(gpa: Allocator, capacity: usize) Allocator.Error!VM {
     return .{
         .allocator = gpa,
@@ -62,7 +73,13 @@ pub fn interpret(self: *VM, ctx: *Context, source: [:0]const u8) !void {
     self.chunk = &chunk;
     self.ip = 0;
 
-    try self.run(ctx);
+    self.run(ctx) catch |err| {
+        if (errorMessage(err)) |message| {
+            try self.runtimeError(ctx.stream.err, "{s}", .{message});
+        } else |any_err| {
+            return any_err;
+        }
+    };
 }
 
 pub fn run(self: *VM, ctx: *Context) VMError!void {
@@ -95,28 +112,28 @@ pub fn run(self: *VM, ctx: *Context) VMError!void {
                 try self.stack.push(gpa, .{ .boolean = left.isEqual(right) });
             },
             .op_greater => {
-                try self.binaryOperation(ctx, .op_greater);
+                try self.binaryOperation(.op_greater);
             },
             .op_less => {
-                try self.binaryOperation(ctx, .op_less);
+                try self.binaryOperation(.op_less);
             },
             .op_add => {
-                try self.addOperation(ctx);
+                try self.addOperation();
             },
             .op_subtract => {
-                try self.binaryOperation(ctx, .op_subtract);
+                try self.binaryOperation(.op_subtract);
             },
             .op_multiply => {
-                try self.binaryOperation(ctx, .op_multiply);
+                try self.binaryOperation(.op_multiply);
             },
             .op_divide => {
-                try self.binaryOperation(ctx, .op_divide);
+                try self.binaryOperation(.op_divide);
             },
             .op_not => {
                 try self.notOperation();
             },
             .op_negate => {
-                try self.negateOperation(ctx);
+                try self.negateOperation();
             },
             .op_return => {
                 // Exit interpreter
@@ -150,19 +167,19 @@ pub fn run(self: *VM, ctx: *Context) VMError!void {
             },
             .op_get_global => {
                 const index = self.readIndex();
-                try self.getVariable(ctx, index);
+                try self.getVariable(index);
             },
             .op_get_global_long => {
                 const index = self.readIndexLong();
-                try self.getVariable(ctx, index);
+                try self.getVariable(index);
             },
             .op_set_global => {
                 const index = self.readIndex();
-                try self.setVariable(ctx, index);
+                try self.setVariable(index);
             },
             .op_set_global_long => {
                 const index = self.readIndexLong();
-                try self.setVariable(ctx, index);
+                try self.setVariable(index);
             },
             .op_get_local => {
                 const index = self.readIndex();
@@ -223,7 +240,7 @@ fn readIndexLong(self: *VM) u32 {
     return index;
 }
 
-fn addOperation(self: *VM, ctx: *Context) !void {
+fn addOperation(self: *VM) !void {
     if (self.stack.len() < 2) return error.UndefinedValue;
 
     const last = self.stack.last() orelse unreachable;
@@ -233,21 +250,17 @@ fn addOperation(self: *VM, ctx: *Context) !void {
     if (left.isString()) {
         try self.concatenate();
     } else if (left.isNumber() and right.isNumber()) {
-        try self.binaryOperation(ctx, .op_add);
+        try self.binaryOperation(.op_add);
     } else {
-        try self.runtimeError(ctx.stream.err, "Invalid Operands Type.", .{});
         return error.InvalidBinaryOperation;
     }
 }
 
-fn binaryOperation(self: *VM, ctx: *Context, code: Chunk.Code) !void {
+fn binaryOperation(self: *VM, code: Chunk.Code) !void {
     const right = self.stack.pop() orelse return error.UndefinedValue;
     const left = self.stack.pop() orelse return error.UndefinedValue;
 
-    if (!left.isSame(right) or !left.isNumber()) {
-        try self.runtimeError(ctx.stream.err, "Operand must be a number.", .{});
-        return error.OperandMustBeNumber;
-    }
+    if (!left.isSame(right) or !left.isNumber()) return error.OperandMustBeNumber;
 
     const result: Value = switch (code) {
         .op_add => .{ .number = left.number + right.number },
@@ -256,10 +269,7 @@ fn binaryOperation(self: *VM, ctx: *Context, code: Chunk.Code) !void {
         .op_divide => .{ .number = left.number / right.number },
         .op_greater => .{ .boolean = left.number > right.number },
         .op_less => .{ .boolean = left.number < right.number },
-        else => {
-            try self.runtimeError(ctx.stream.err, "Invalid Binary Operation", .{});
-            return error.InvalidBinaryOperation;
-        },
+        else => return error.InvalidBinaryOperation,
     };
     try self.stack.push(self.allocator, result);
 }
@@ -272,15 +282,13 @@ fn notOperation(self: *VM) !void {
     self.stack.set(index, .{ .boolean = value.isFalsey() });
 }
 
-fn negateOperation(self: *VM, ctx: *Context) !void {
+fn negateOperation(self: *VM) !void {
     if (self.stack.len() == 0) return error.UndefinedValue;
 
     const index = self.stack.last() orelse unreachable;
     const value = self.stack.peek();
-    if (value != .number) {
-        try self.runtimeError(ctx.stream.err, "Operand must be a number", .{});
-        return error.OperandMustBeNumber;
-    }
+
+    if (value != .number) return error.OperandMustBeNumber;
     self.stack.set(index, .{ .number = -(value.number) });
 }
 
@@ -293,17 +301,15 @@ fn defineVariable(self: *VM, index: u32) !void {
     _ = self.stack.pop() orelse return error.UndefinedValue;
 }
 
-fn getVariable(self: *VM, ctx: *Context, index: u32) !void {
+fn getVariable(self: *VM, index: u32) !void {
     if (index >= self.globals.items.len) {
-        try self.runtimeError(ctx.stream.err, "Undefined Variable.", .{});
         return error.UndefinedValue;
     }
     try self.stack.push(self.allocator, self.globals.items[@intCast(index)]);
 }
 
-fn setVariable(self: *VM, ctx: *Context, index: u32) !void {
+fn setVariable(self: *VM, index: u32) !void {
     if (index >= self.globals.items.len) {
-        try self.runtimeError(ctx.stream.err, "Undefined Variable.", .{});
         return error.UndefinedValue;
     }
     self.globals.items[@intCast(index)] = self.stack.peek();
