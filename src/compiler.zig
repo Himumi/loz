@@ -5,8 +5,8 @@ pub fn compile(
     source: [:0]const u8,
 ) CompilerError!Chunk {
     var compiler: Compiler = .init(gpa, source);
-    defer compiler.deinit(gpa);
-    return try compiler.compile(gpa, ctx, strings);
+    defer compiler.deinit();
+    return try compiler.compile(ctx, strings);
 }
 
 pub const CompilerError =
@@ -33,6 +33,7 @@ const LoopContext = struct {
 };
 
 pub const Compiler = struct {
+    allocator: Allocator,
     /// Borrow from the caller.
     source: [:0]const u8,
     /// Borrow from the caller.
@@ -106,6 +107,7 @@ pub const Compiler = struct {
 
     pub fn init(gpa: Allocator, source: [:0]const u8) Compiler {
         return .{
+            .allocator = gpa,
             .source = source,
             .ctx = undefined,
             .strings = undefined,
@@ -125,20 +127,15 @@ pub const Compiler = struct {
         };
     }
 
-    pub fn deinit(self: *Compiler, gpa: Allocator) void {
+    pub fn deinit(self: *Compiler) void {
         self.global_symbols.deinit();
-        self.loop_ctx.deinit(gpa);
+        self.loop_ctx.deinit(self.allocator);
     }
 
-    pub fn compile(
-        self: *Compiler,
-        gpa: Allocator,
-        ctx: *Context,
-        strings: *Strings,
-    ) CompilerError!Chunk {
+    pub fn compile(self: *Compiler, ctx: *Context, strings: *Strings) CompilerError!Chunk {
         // Initialize the chunk here to prevent mismatching memory ownership.
         var chunk: Chunk.Builder = .empty;
-        defer chunk.deinit(gpa);
+        defer chunk.deinit(self.allocator);
 
         // Borrow the chunk memory.
         self.chunk = &chunk;
@@ -156,52 +153,52 @@ pub const Compiler = struct {
 
         // Compile one expression.
         while (self.current.tag != .eof) {
-            try self.declaration(gpa);
+            try self.declaration();
         }
         try self.consume(.eof, "Expect end of expression.");
 
-        try self.emitReturn(gpa);
+        try self.emitReturn();
         // if (!self.had_error) {
         // }
 
         // The caller ownes the ownership.
-        return try chunk.toOwnedSlice(gpa);
+        return try chunk.toOwnedSlice(self.allocator);
     }
 
-    fn declaration(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn declaration(self: *Compiler) CompilerError!void {
         switch (self.current.tag) {
             .keyword_var => {
                 try self.advance();
-                try self.varDeclaration(gpa);
+                try self.varDeclaration();
             },
-            else => try self.statement(gpa),
+            else => try self.statement(),
         }
         // TODO: Move this sync function to compile function with another error handling.
         if (self.panic_mode) try self.sync();
     }
 
-    fn varDeclaration(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn varDeclaration(self: *Compiler) CompilerError!void {
         const previous_line = self.previous.line;
         try self.consume(.identifier, "Expect variable name.");
 
-        const global_index = try self.parseVariableName(gpa);
+        const global_index = try self.parseVariableName();
 
         if (self.current.tag == .equal) {
             try self.advance();
-            try self.expression(gpa);
+            try self.expression();
         } else {
-            try self.emitByte(gpa, .op_nil);
+            try self.emitByte(.op_nil);
         }
         try self.consume(.semicolon, "Expect ';' after variable expression.");
 
-        try self.defineVariable(gpa, global_index, previous_line);
+        try self.defineVariable(global_index, previous_line);
     }
 
-    fn parseVariableName(self: *Compiler, gpa: Allocator) !u32 {
+    fn parseVariableName(self: *Compiler) !u32 {
         try self.declareVariable();
         if (self.scope.depth > 0) return 0;
 
-        return try self.identifierConstant(gpa, self.previous);
+        return try self.identifierConstant(self.previous);
     }
 
     fn declareVariable(self: *Compiler) CompilerError!void {
@@ -230,7 +227,7 @@ pub const Compiler = struct {
         };
     }
 
-    fn defineVariable(self: *Compiler, gpa: Allocator, global_index: u32, line: u32) !void {
+    fn defineVariable(self: *Compiler, global_index: u32, line: u32) !void {
         if (self.scope.depth > 0) return self.scope.mark();
 
         const code: Chunk.Code = if (global_index < values.max_u8)
@@ -238,8 +235,8 @@ pub const Compiler = struct {
         else
             .op_define_global_long;
 
-        try self.emitByte(gpa, code);
-        try self.emitLiteral(gpa, global_index, line);
+        try self.emitByte(code);
+        try self.emitLiteral(global_index, line);
     }
 
     fn resolveLocal(self: *Compiler, token: Token) Io.Writer.Error!?u32 {
@@ -260,13 +257,13 @@ pub const Compiler = struct {
         return null;
     }
 
-    fn identifierConstant(self: *Compiler, gpa: Allocator, token: Token) !u32 {
+    fn identifierConstant(self: *Compiler, token: Token) !u32 {
         const lexeme = token.lexeme(self.source);
 
         const gop = try self.strings.getOrPut(lexeme);
         if (!gop.found_existing) {
-            const string_object = try gpa.create(String);
-            errdefer gpa.destroy(string_object);
+            const string_object = try self.allocator.create(String);
+            errdefer self.allocator.destroy(string_object);
 
             string_object.* = .init(.@"const", lexeme, Object{
                 .kind = .string,
@@ -277,93 +274,93 @@ pub const Compiler = struct {
         }
 
         const head = &gop.value_ptr.*.head;
-        return try self.makeConstant(gpa, .{ .object = head });
+        return try self.makeConstant(.{ .object = head });
     }
 
-    fn statement(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn statement(self: *Compiler) CompilerError!void {
         switch (self.current.tag) {
             .keyword_print => {
                 try self.advance();
-                try self.printStatement(gpa);
+                try self.printStatement();
             },
             .keyword_if => {
                 try self.advance();
-                try self.ifStatement(gpa);
+                try self.ifStatement();
             },
             .keyword_while => {
                 try self.advance();
-                try self.whileStatement(gpa);
+                try self.whileStatement();
             },
             .keyword_for => {
                 try self.advance();
-                try self.forStatement(gpa);
+                try self.forStatement();
             },
             .l_brace => {
                 try self.advance();
 
                 self.beginScope();
-                try self.block(gpa);
-                try self.endScope(gpa);
+                try self.block();
+                try self.endScope();
             },
-            .keyword_break => try self.breakStatement(gpa),
-            .keyword_continue => try self.continueStatement(gpa),
-            else => try self.expressionStatement(gpa),
+            .keyword_break => try self.breakStatement(),
+            .keyword_continue => try self.continueStatement(),
+            else => try self.expressionStatement(),
         }
     }
 
-    fn printStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
-        try self.expression(gpa);
+    fn printStatement(self: *Compiler) CompilerError!void {
+        try self.expression();
         try self.consume(.semicolon, "Expect ';' after value.");
-        try self.emitByte(gpa, .op_print);
+        try self.emitByte(.op_print);
     }
 
-    fn expressionStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
-        try self.expression(gpa);
+    fn expressionStatement(self: *Compiler) CompilerError!void {
+        try self.expression();
         try self.consume(.semicolon, "Expect ';' after value.");
-        try self.emitByte(gpa, .op_pop);
+        try self.emitByte(.op_pop);
     }
 
-    fn ifStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn ifStatement(self: *Compiler) CompilerError!void {
         try self.consume(.l_paren, "Expect '(' after 'if'.");
-        try self.expression(gpa);
+        try self.expression();
         try self.consume(.r_paren, "Expect ')' after condition.");
 
-        const then_index = try self.emitJump(gpa, .op_jump_if_false);
-        try self.emitByte(gpa, .op_pop);
-        try self.statement(gpa);
+        const then_index = try self.emitJump(.op_jump_if_false);
+        try self.emitByte(.op_pop);
+        try self.statement();
 
-        const else_index = try self.emitJump(gpa, .op_jump);
+        const else_index = try self.emitJump(.op_jump);
         try self.patchJump(@intCast(then_index));
 
-        try self.emitByte(gpa, .op_pop);
+        try self.emitByte(.op_pop);
         if (self.current.tag == .keyword_else) {
             try self.advance();
-            try self.statement(gpa);
+            try self.statement();
         }
         try self.patchJump(else_index);
     }
 
-    fn whileStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn whileStatement(self: *Compiler) CompilerError!void {
         // Condition
         const loop_start = self.chunk.codes.items.len;
         try self.consume(.l_paren, "Expect '(' after 'while'.");
-        try self.expression(gpa);
+        try self.expression();
         try self.consume(.r_paren, "Expect ')' after condition.");
 
         var loop_ctx: LoopContext = .init(loop_start);
-        defer loop_ctx.deinit(gpa);
+        defer loop_ctx.deinit(self.allocator);
 
-        try self.loop_ctx.append(gpa, &loop_ctx);
+        try self.loop_ctx.append(self.allocator, &loop_ctx);
 
-        const exit_index = try self.emitJump(gpa, .op_jump_if_false);
-        try self.emitByte(gpa, .op_pop);
+        const exit_index = try self.emitJump(.op_jump_if_false);
+        try self.emitByte(.op_pop);
 
         // Statement Body.
-        try self.statement(gpa);
-        try self.emitLoop(gpa, loop_start);
+        try self.statement();
+        try self.emitLoop(loop_start);
 
         try self.patchJump(exit_index);
-        try self.emitByte(gpa, .op_pop);
+        try self.emitByte(.op_pop);
 
         // Patch the 'break' statements.
         for (loop_ctx.break_statements.items) |break_index| {
@@ -372,11 +369,11 @@ pub const Compiler = struct {
         _ = self.loop_ctx.pop();
     }
 
-    fn forStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn forStatement(self: *Compiler) CompilerError!void {
         var loop_ctx: LoopContext = .init(undefined);
-        defer loop_ctx.deinit(gpa);
+        defer loop_ctx.deinit(self.allocator);
 
-        try self.loop_ctx.append(gpa, &loop_ctx);
+        try self.loop_ctx.append(self.allocator, &loop_ctx);
         self.beginScope();
 
         // Initializer
@@ -385,9 +382,9 @@ pub const Compiler = struct {
             .semicolon => try self.advance(),
             .keyword_var => {
                 try self.advance();
-                try self.varDeclaration(gpa);
+                try self.varDeclaration();
             },
-            else => try self.expressionStatement(gpa),
+            else => try self.expressionStatement(),
         }
 
         // Condition
@@ -397,26 +394,26 @@ pub const Compiler = struct {
         loop_ctx.continue_index = loop_start;
 
         if (self.current.tag != .semicolon) {
-            try self.expression(gpa);
+            try self.expression();
             try self.consume(.semicolon, "Expect ';' after loop condition.");
 
-            exit_index = try self.emitJump(gpa, .op_jump_if_false);
-            try self.emitByte(gpa, .op_pop);
+            exit_index = try self.emitJump(.op_jump_if_false);
+            try self.emitByte(.op_pop);
         }
 
         // Increment Clause
         if (self.current.tag != .r_paren) {
-            const body_index = try self.emitJump(gpa, .op_jump);
+            const body_index = try self.emitJump(.op_jump);
             const increment_start = self.chunk.codes.items.len;
 
             loop_ctx.continue_index = increment_start;
 
-            try self.expression(gpa);
-            try self.emitByte(gpa, .op_pop);
+            try self.expression();
+            try self.emitByte(.op_pop);
 
             try self.consume(.r_paren, "Expect ')' after for clauses.");
 
-            try self.emitLoop(gpa, loop_start);
+            try self.emitLoop(loop_start);
             try self.patchJump(body_index);
 
             // Set the loop starting point to increment part.
@@ -424,14 +421,14 @@ pub const Compiler = struct {
         }
 
         // Statement Body
-        try self.statement(gpa);
-        try self.emitLoop(gpa, loop_start);
+        try self.statement();
+        try self.emitLoop(loop_start);
 
         if (exit_index) |index| {
             try self.patchJump(index);
-            try self.emitByte(gpa, .op_pop);
+            try self.emitByte(.op_pop);
         }
-        try self.endScope(gpa);
+        try self.endScope();
 
         // Patch the 'break' statements.
         for (loop_ctx.break_statements.items) |break_index| {
@@ -440,7 +437,7 @@ pub const Compiler = struct {
         _ = self.loop_ctx.pop();
     }
 
-    fn breakStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn breakStatement(self: *Compiler) CompilerError!void {
         try self.consume(.keyword_break, "Expect 'break'.");
         if (self.loop_ctx.items.len == 0) {
             return try self.errorAt(self.previous, "Can't use 'break' outside of a loop.");
@@ -449,11 +446,11 @@ pub const Compiler = struct {
         try self.consume(.semicolon, "Expect ';' after 'break'.");
         const loop_ctx = self.loop_ctx.getLast();
 
-        const break_index = try self.emitJump(gpa, .op_jump);
-        try loop_ctx.break_statements.append(gpa, break_index);
+        const break_index = try self.emitJump(.op_jump);
+        try loop_ctx.break_statements.append(self.allocator, break_index);
     }
 
-    fn continueStatement(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn continueStatement(self: *Compiler) CompilerError!void {
         try self.consume(.keyword_continue, "Expect 'continue'.");
 
         if (self.loop_ctx.items.len == 0) {
@@ -462,21 +459,21 @@ pub const Compiler = struct {
         try self.consume(.semicolon, "Expect ';' after 'continue'.");
 
         const loop_ctx = self.loop_ctx.getLast();
-        try self.emitLoop(gpa, loop_ctx.continue_index);
+        try self.emitLoop(loop_ctx.continue_index);
     }
 
-    fn expression(self: *Compiler, gpa: Allocator) CompilerError!void {
-        try self.parsePrecedence(gpa, .assignment);
+    fn expression(self: *Compiler) CompilerError!void {
+        try self.parsePrecedence(.assignment);
     }
 
-    fn block(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn block(self: *Compiler) CompilerError!void {
         while (self.current.tag != .r_brace and self.current.tag != .eof) {
-            try self.declaration(gpa);
+            try self.declaration();
         }
         try self.consume(.r_brace, "Expect '}' after block.");
     }
 
-    fn parsePrecedence(self: *Compiler, gpa: Allocator, precedence: Precedence) CompilerError!void {
+    fn parsePrecedence(self: *Compiler, precedence: Precedence) CompilerError!void {
         try self.advance();
 
         const prefix_rule = rules.get(self.previous.tag).prefix;
@@ -488,7 +485,7 @@ pub const Compiler = struct {
         const assign_int = @intFromEnum(Precedence.assignment);
 
         const assignable = prece_int <= assign_int;
-        try self.parseRule(gpa, prefix_rule, assignable);
+        try self.parseRule(prefix_rule, assignable);
 
         while (true) {
             const curr_prece = rules.get(self.current.tag).precedence;
@@ -498,7 +495,7 @@ pub const Compiler = struct {
             try self.advance();
 
             const infix_rule = rules.get(self.previous.tag).infix;
-            try self.parseRule(gpa, infix_rule, assignable);
+            try self.parseRule(infix_rule, assignable);
         }
 
         if (assignable and self.current.tag == .equal) {
@@ -507,49 +504,44 @@ pub const Compiler = struct {
         }
     }
 
-    fn parseRule(
-        self: *Compiler,
-        gpa: Allocator,
-        rule: Rule.Kind,
-        assignable: bool,
-    ) CompilerError!void {
+    fn parseRule(self: *Compiler, rule: Rule.Kind, assignable: bool) CompilerError!void {
         switch (rule) {
-            .literal => try self.parseLiteral(gpa),
-            .number => try self.parseNumber(gpa),
-            .string => try self.parseString(gpa),
-            .@"and" => try self.parseAnd(gpa),
-            .@"or" => try self.parseOr(gpa),
-            .group => try self.parseGroup(gpa),
-            .binary => try self.parseBinary(gpa),
-            .unary => try self.parseUnary(gpa),
-            .variable => try self.parseVariable(gpa, assignable),
+            .literal => try self.parseLiteral(),
+            .number => try self.parseNumber(),
+            .string => try self.parseString(),
+            .@"and" => try self.parseAnd(),
+            .@"or" => try self.parseOr(),
+            .group => try self.parseGroup(),
+            .binary => try self.parseBinary(),
+            .unary => try self.parseUnary(),
+            .variable => try self.parseVariable(assignable),
             .null => {},
         }
     }
 
-    fn parseLiteral(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn parseLiteral(self: *Compiler) CompilerError!void {
         switch (self.previous.tag) {
-            .keyword_false => try self.emitByte(gpa, .op_false),
-            .keyword_nil => try self.emitByte(gpa, .op_nil),
-            .keyword_true => try self.emitByte(gpa, .op_true),
+            .keyword_false => try self.emitByte(.op_false),
+            .keyword_nil => try self.emitByte(.op_nil),
+            .keyword_true => try self.emitByte(.op_true),
             else => unreachable,
         }
     }
 
-    fn parseNumber(self: *Compiler, gpa: Allocator) !void {
+    fn parseNumber(self: *Compiler) !void {
         const value = try fmt.parseFloat(f64, self.previous.lexeme(self.source));
-        try self.emitConstant(gpa, .{ .number = value });
+        try self.emitConstant(.{ .number = value });
     }
 
-    fn parseString(self: *Compiler, gpa: Allocator) !void {
+    fn parseString(self: *Compiler) !void {
         const lexeme = self.previous.lexeme(self.source);
         const str = lexeme[1 .. lexeme.len - 1];
 
         const gop = try self.strings.getOrPut(str);
         if (!gop.found_existing) {
             // NOTE: Use imperative way for readability.
-            const string_object = try gpa.create(String);
-            errdefer gpa.destroy(string_object);
+            const string_object = try self.allocator.create(String);
+            errdefer self.allocator.destroy(string_object);
 
             string_object.* = .init(.@"const", str, Object{
                 .kind = .string,
@@ -560,46 +552,46 @@ pub const Compiler = struct {
         }
 
         const head = &gop.value_ptr.*.head;
-        try self.emitConstant(gpa, .{ .object = head });
+        try self.emitConstant(.{ .object = head });
     }
 
-    fn parseAnd(self: *Compiler, gpa: Allocator) !void {
-        const end_index = try self.emitJump(gpa, .op_jump_if_false);
+    fn parseAnd(self: *Compiler) !void {
+        const end_index = try self.emitJump(.op_jump_if_false);
 
-        try self.emitByte(gpa, .op_pop);
-        try self.parsePrecedence(gpa, .@"and");
+        try self.emitByte(.op_pop);
+        try self.parsePrecedence(.@"and");
 
         try self.patchJump(end_index);
     }
 
-    fn parseOr(self: *Compiler, gpa: Allocator) !void {
-        const else_index = try self.emitJump(gpa, .op_jump_if_false);
-        const end_index = try self.emitJump(gpa, .op_jump);
+    fn parseOr(self: *Compiler) !void {
+        const else_index = try self.emitJump(.op_jump_if_false);
+        const end_index = try self.emitJump(.op_jump);
 
         try self.patchJump(else_index);
-        try self.emitByte(gpa, .op_pop);
+        try self.emitByte(.op_pop);
 
-        try self.parsePrecedence(gpa, .@"or");
+        try self.parsePrecedence(.@"or");
         try self.patchJump(end_index);
     }
 
-    fn parseGroup(self: *Compiler, gpa: Allocator) CompilerError!void {
-        try self.expression(gpa);
+    fn parseGroup(self: *Compiler) CompilerError!void {
+        try self.expression();
         try self.consume(.r_paren, "Expect ')' after expression.");
     }
 
-    fn parseUnary(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn parseUnary(self: *Compiler) CompilerError!void {
         const operator_tag = self.previous.tag;
 
-        try self.parsePrecedence(gpa, .unary);
+        try self.parsePrecedence(.unary);
         switch (operator_tag) {
-            .minus => try self.emitByte(gpa, .op_negate),
-            .bang => try self.emitByte(gpa, .op_not),
+            .minus => try self.emitByte(.op_negate),
+            .bang => try self.emitByte(.op_not),
             else => unreachable,
         }
     }
 
-    fn parseBinary(self: *Compiler, gpa: Allocator) CompilerError!void {
+    fn parseBinary(self: *Compiler) CompilerError!void {
         const operator_tag = self.previous.tag;
 
         const rule = rules.get(operator_tag);
@@ -607,54 +599,49 @@ pub const Compiler = struct {
 
         // Need to higher up the precedence.
         const next_precedence: Precedence = @enumFromInt(precedence_int + 1);
-        try self.parsePrecedence(gpa, next_precedence);
+        try self.parsePrecedence(next_precedence);
 
         switch (operator_tag) {
             .bang_equal => {
-                try self.emitByte(gpa, .op_equal);
-                try self.emitByte(gpa, .op_not);
+                try self.emitByte(.op_equal);
+                try self.emitByte(.op_not);
             },
-            .equal_equal => try self.emitByte(gpa, .op_equal),
-            .greater => try self.emitByte(gpa, .op_greater),
+            .equal_equal => try self.emitByte(.op_equal),
+            .greater => try self.emitByte(.op_greater),
             .greater_equal => {
-                try self.emitByte(gpa, .op_less);
-                try self.emitByte(gpa, .op_not);
+                try self.emitByte(.op_less);
+                try self.emitByte(.op_not);
             },
-            .less => try self.emitByte(gpa, .op_less),
+            .less => try self.emitByte(.op_less),
             .less_equal => {
-                try self.emitByte(gpa, .op_greater);
-                try self.emitByte(gpa, .op_not);
+                try self.emitByte(.op_greater);
+                try self.emitByte(.op_not);
             },
-            .plus => try self.emitByte(gpa, .op_add),
-            .minus => try self.emitByte(gpa, .op_subtract),
-            .star => try self.emitByte(gpa, .op_multiply),
-            .slash => try self.emitByte(gpa, .op_divide),
+            .plus => try self.emitByte(.op_add),
+            .minus => try self.emitByte(.op_subtract),
+            .star => try self.emitByte(.op_multiply),
+            .slash => try self.emitByte(.op_divide),
             else => unreachable,
         }
     }
 
-    fn parseVariable(self: *Compiler, gpa: Allocator, assignable: bool) CompilerError!void {
-        try self.namedVariable(gpa, self.previous, assignable);
+    fn parseVariable(self: *Compiler, assignable: bool) CompilerError!void {
+        try self.namedVariable(self.previous, assignable);
     }
 
-    fn namedVariable(
-        self: *Compiler,
-        gpa: Allocator,
-        token: Token,
-        assignable: bool,
-    ) CompilerError!void {
+    fn namedVariable(self: *Compiler, token: Token, assignable: bool) CompilerError!void {
         const local_index = try self.resolveLocal(token);
         const arg_index: u32 = if (local_index) |index|
             index
         else
-            try self.identifierConstant(gpa, token);
+            try self.identifierConstant(token);
 
         const is_short = arg_index < values.max_u8;
         const is_assignable = assignable and self.current.tag == .equal;
 
         if (is_assignable) {
             try self.advance();
-            try self.expression(gpa);
+            try self.expression();
         }
 
         const code: Chunk.Code = blk: {
@@ -685,8 +672,8 @@ pub const Compiler = struct {
                 .op_get_global_long;
         };
 
-        try self.emitByte(gpa, code);
-        try self.emitLiteral(gpa, arg_index, token.line);
+        try self.emitByte(code);
+        try self.emitLiteral(arg_index, token.line);
     }
 
     fn advance(self: *Compiler) Io.Writer.Error!void {
@@ -727,17 +714,13 @@ pub const Compiler = struct {
         try self.errorAt(self.current, message);
     }
 
-    fn makeConstant(
-        self: *Compiler,
-        gpa: Allocator,
-        value: Value,
-    ) (Allocator.Error || Io.Writer.Error)!u32 {
+    fn makeConstant(self: *Compiler, value: Value) (Allocator.Error || Io.Writer.Error)!u32 {
         // Prevent deduplication for constant values.
         for (self.chunk.constants.items, 0..) |constant, index| {
             if (constant.isEqual(value)) return @intCast(index);
         }
 
-        const index = try self.chunk.addValue(gpa, value);
+        const index = try self.chunk.addValue(self.allocator, value);
         if (index > values.max_u24) { // Update based on constant long.
             // TODO: Need an error.
             try self.errorAt(self.previous, "Too many constants in one chunk");
@@ -746,24 +729,20 @@ pub const Compiler = struct {
         return index;
     }
 
-    fn emitByte(self: *Compiler, gpa: Allocator, code: Chunk.Code) Allocator.Error!void {
-        try self.chunk.writeChunk(gpa, code, self.previous.line);
+    fn emitByte(self: *Compiler, code: Chunk.Code) Allocator.Error!void {
+        try self.chunk.writeChunk(self.allocator, code, self.previous.line);
     }
 
-    fn emitConstant(
-        self: *Compiler,
-        gpa: Allocator,
-        value: Value,
-    ) (Allocator.Error || Io.Writer.Error)!void {
-        const value_index = try self.makeConstant(gpa, value);
-        try self.chunk.writeConstant(gpa, @intCast(value_index), self.previous.line);
+    fn emitConstant(self: *Compiler, value: Value) (Allocator.Error || Io.Writer.Error)!void {
+        const value_index = try self.makeConstant(value);
+        try self.chunk.writeConstant(self.allocator, @intCast(value_index), self.previous.line);
     }
 
-    fn emitJump(self: *Compiler, gpa: Allocator, instruction: Chunk.Code) !u32 {
-        try self.emitByte(gpa, instruction);
+    fn emitJump(self: *Compiler, instruction: Chunk.Code) !u32 {
+        try self.emitByte(instruction);
 
-        try self.emitByte(gpa, .op_empty);
-        try self.emitByte(gpa, .op_empty);
+        try self.emitByte(.op_empty);
+        try self.emitByte(.op_empty);
 
         return @intCast(self.chunk.codes.items.len - 2);
     }
@@ -779,18 +758,18 @@ pub const Compiler = struct {
         }
     }
 
-    fn emitLiteral(self: *Compiler, gpa: Allocator, index: u32, line: u32) Allocator.Error!void {
+    fn emitLiteral(self: *Compiler, index: u32, line: u32) Allocator.Error!void {
         if (index < values.max_u8) {
-            try self.chunk.writeLiteral(gpa, @intCast(index), line);
+            try self.chunk.writeLiteral(self.allocator, @intCast(index), line);
         } else {
             for (utils.writeU24(index)) |byte| {
-                try self.chunk.writeLiteral(gpa, byte, line);
+                try self.chunk.writeLiteral(self.allocator, byte, line);
             }
         }
     }
 
-    fn emitLoop(self: *Compiler, gpa: Allocator, loop_start: usize) !void {
-        try self.emitByte(gpa, .op_loop);
+    fn emitLoop(self: *Compiler, loop_start: usize) !void {
+        try self.emitByte(.op_loop);
 
         const offset = self.chunk.codes.items.len - loop_start + 2;
         if (offset > values.max_u16) {
@@ -798,23 +777,23 @@ pub const Compiler = struct {
         }
 
         for (utils.writeU16(@intCast(offset))) |byte| {
-            try self.emitByte(gpa, @enumFromInt(byte));
+            try self.emitByte(@enumFromInt(byte));
         }
     }
 
-    fn emitReturn(self: *Compiler, gpa: Allocator) Allocator.Error!void {
-        try self.emitByte(gpa, .op_return);
+    fn emitReturn(self: *Compiler) Allocator.Error!void {
+        try self.emitByte(.op_return);
     }
 
-    fn endCompiler(self: *Compiler, gpa: Allocator) Allocator.Error!void {
-        try self.emitReturn(gpa);
+    fn endCompiler(self: *Compiler) Allocator.Error!void {
+        try self.emitReturn();
     }
 
     fn beginScope(self: *Compiler) void {
         self.scope.depth += 1;
     }
 
-    fn endScope(self: *Compiler, gpa: Allocator) !void {
+    fn endScope(self: *Compiler) !void {
         // TODO: Need an error handling if it is being called in global scope.
         if (self.scope.depth == 0) return;
         self.scope.depth -= 1;
@@ -824,7 +803,7 @@ pub const Compiler = struct {
             if (local.depth) |depth| {
                 if (depth <= self.scope.depth) break;
             }
-            try self.emitByte(gpa, .op_pop);
+            try self.emitByte(.op_pop);
         }
     }
 
