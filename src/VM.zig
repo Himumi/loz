@@ -224,11 +224,13 @@ fn readIndexLong(self: *VM) u32 {
 }
 
 fn addOperation(self: *VM, ctx: *Context) !void {
-    const len = self.stack.len();
-    const right = self.stack.get(len - 1) orelse return error.UndefinedValue;
-    const left = self.stack.get(len - 2) orelse return error.UndefinedValue;
+    if (self.stack.len() < 2) return error.UndefinedValue;
 
-    if (left.isString() and right.isString()) {
+    const last = self.stack.last() orelse unreachable;
+    const right = self.stack.get(last) orelse unreachable;
+    const left = self.stack.get(last - 1) orelse unreachable;
+
+    if (left.isString()) {
         try self.concatenate();
     } else if (left.isNumber() and right.isNumber()) {
         try self.binaryOperation(ctx, .op_add);
@@ -313,44 +315,59 @@ fn concatenate(self: *VM) !void {
     // It does not own the ownership.
     const left = self.stack.pop() orelse return error.UndefinedValue;
 
-    if (right.isString() and left.isString()) {
-        const left_str = left.object.getParentPtr(String);
-        const right_str = right.object.getParentPtr(String);
+    if (!left.isString()) return error.InvalidBinaryOperation;
+    const left_str = left.object.getParentPtr(String);
 
-        const concat = try mem.concat(self.allocator, u8, &.{
-            left_str.slice(),
-            right_str.slice(),
-        });
-        errdefer self.allocator.free(concat);
+    const concat = try concatToString(self.allocator, left_str, right);
+    errdefer self.allocator.free(concat);
 
-        const gop = try self.strings.getOrPut(concat);
-        if (gop.found_existing) {
-            // It has found a same string.
-            self.allocator.free(concat);
-        } else {
-            // NOTE: Use imperative way for readability.
-            const string_object = try self.allocator.create(String);
-            errdefer self.allocator.destroy(string_object);
-
-            string_object.* = .init(.owned, concat, Object{
-                .kind = .string,
-                .next = self.objects,
-            });
-            // Add the new object to VM's Objects to track the memory.
-            self.objects = &string_object.head;
-            // Add the new object to VM's Strings.
-            gop.value_ptr.* = string_object;
-        }
-
-        const head = &gop.value_ptr.*.head;
-        try self.stack.push(self.allocator, .{ .object = head });
-    } else {
-        return error.InvalidBinaryOperation;
-    }
+    // Transfer the concat memory.
+    const head = try self.putToStrings(concat);
+    try self.stack.push(self.allocator, .{ .object = head });
 }
 
-fn runtimeError(self: *VM, writer: *Io.Writer, comptime fmt: []const u8, args: anytype) !void {
-    try writer.print(fmt, args);
+fn concatToString(gpa: Allocator, str: *String, value: Value) ![]const u8 {
+    if (value.isString()) {
+        const value_str = value.object.getParentPtr(String);
+        return try mem.concat(gpa, u8, &.{ str.slice(), value_str.slice() });
+    }
+    if (value.isNumber()) {
+        return try fmt.allocPrint(gpa, "{s}{d}", .{ str.slice(), value.number });
+    }
+    if (value.isBoolean()) {
+        return try fmt.allocPrint(gpa, "{s}{}", .{ str.slice(), value.boolean });
+    }
+    if (value.isNil()) {
+        return try fmt.allocPrint(gpa, "{s}nil", .{str.slice()});
+    }
+    return error.InvalidBinaryOperation;
+}
+
+/// Take the concat memory and return String's head(Object) pointer.
+fn putToStrings(self: *VM, concat: []const u8) !*Object {
+    const gop = try self.strings.getOrPut(concat);
+    if (gop.found_existing) {
+        // It has found a same string.
+        self.allocator.free(concat);
+    } else {
+        // NOTE: Use imperative way for readability.
+        const string_object = try self.allocator.create(String);
+        errdefer self.allocator.destroy(string_object);
+
+        string_object.* = .init(.owned, concat, Object{
+            .kind = .string,
+            .next = self.objects,
+        });
+        // Add the new object to VM's Objects to track the memory.
+        self.objects = &string_object.head;
+        // Add the new object to VM's Strings.
+        gop.value_ptr.* = string_object;
+    }
+    return &gop.value_ptr.*.head;
+}
+
+fn runtimeError(self: *VM, writer: *Io.Writer, comptime format: []const u8, args: anytype) !void {
+    try writer.print(format, args);
     try writer.writeByte('\n');
 
     const line = Chunk.getLine(self.chunk.lines, self.ip) orelse 0;
@@ -390,6 +407,22 @@ test "VM" {
     try testCompile(
         \\ print "hello, " + "world!";
     , "hello, world!");
+
+    try testCompile(
+        \\ print "hello, " + 10;
+    , "hello, 10");
+
+    try testCompile(
+        \\ print "hello, " + true;
+    , "hello, true");
+
+    try testCompile(
+        \\ print "hello, " + false;
+    , "hello, false");
+
+    try testCompile(
+        \\ print "hello, " + nil;
+    , "hello, nil");
 
     try testCompile(
         \\ print "hello" == "hello";
@@ -496,6 +529,7 @@ fn testCompile(source: [:0]const u8, expected: []const u8) !void {
 }
 
 const std = @import("std");
+const fmt = std.fmt;
 const mem = std.mem;
 const testing = std.testing;
 
