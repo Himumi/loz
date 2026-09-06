@@ -1,6 +1,6 @@
-const VMError = Error || Io.Writer.Error || Allocator.Error;
-
 const VM = @This();
+
+allocator: Allocator,
 // It borrows the memory.
 chunk: *Chunk,
 ip: usize,
@@ -11,7 +11,11 @@ objects: ?*Object,
 globals: std.ArrayList(Value),
 strings: Strings,
 
-pub const Error = (RuntimeError || Compiler.Error);
+const VMError =
+    RuntimeError ||
+    Compiler.Error ||
+    Io.Writer.Error ||
+    Allocator.Error;
 
 pub const RuntimeError = error{
     EmptyStack,
@@ -21,8 +25,9 @@ pub const RuntimeError = error{
     OperandMustBeNumber,
 };
 
-pub fn initCapacity(gpa: Allocator, capacity: usize) Allocator.Error!VM {
+pub fn init(gpa: Allocator, capacity: usize) Allocator.Error!VM {
     return .{
+        .allocator = gpa,
         .chunk = undefined,
         .ip = 0,
         .stack = try .initCapacity(gpa, capacity),
@@ -32,20 +37,20 @@ pub fn initCapacity(gpa: Allocator, capacity: usize) Allocator.Error!VM {
     };
 }
 
-pub fn deinit(self: *VM, gpa: Allocator) void {
-    self.stack.deinit(gpa);
+pub fn deinit(self: *VM) void {
+    self.globals.deinit(self.allocator);
+    self.stack.deinit(self.allocator);
     self.strings.deinit();
-    self.globals.deinit(gpa);
 
     var object_ptr = self.objects;
     while (object_ptr) |object| {
         object_ptr = object.next;
-        object.deinit(gpa);
+        object.deinit(self.allocator);
     }
 }
 
-pub fn interpret(self: *VM, gpa: Allocator, ctx: *Context, source: [:0]const u8) !void {
-    var arena_allocator: std.heap.ArenaAllocator = .init(gpa);
+pub fn interpret(self: *VM, ctx: *Context, source: [:0]const u8) !void {
+    var arena_allocator: std.heap.ArenaAllocator = .init(self.allocator);
     defer arena_allocator.deinit();
 
     const arena = arena_allocator.allocator();
@@ -57,10 +62,11 @@ pub fn interpret(self: *VM, gpa: Allocator, ctx: *Context, source: [:0]const u8)
     self.chunk = &chunk;
     self.ip = 0;
 
-    try self.run(gpa, ctx);
+    try self.run(ctx);
 }
 
-pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
+pub fn run(self: *VM, ctx: *Context) VMError!void {
+    const gpa = self.allocator;
     while (self.ip < self.chunk.codes.len) {
         // Uncomment for debugging.
         // try self.dumpStack(ctx.stream.err);
@@ -78,12 +84,12 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
                 const a = self.stack.store.pop() orelse return error.UndefinedValue;
                 try self.stack.push(gpa, .{ .boolean = a.isEqual(b) });
             },
-            .op_greater => try self.binaryOperation(gpa, ctx, .op_greater),
-            .op_less => try self.binaryOperation(gpa, ctx, .op_less),
-            .op_add => try self.addOperation(gpa, ctx),
-            .op_subtract => try self.binaryOperation(gpa, ctx, .op_subtract),
-            .op_multiply => try self.binaryOperation(gpa, ctx, .op_multiply),
-            .op_divide => try self.binaryOperation(gpa, ctx, .op_divide),
+            .op_greater => try self.binaryOperation(ctx, .op_greater),
+            .op_less => try self.binaryOperation(ctx, .op_less),
+            .op_add => try self.addOperation(ctx),
+            .op_subtract => try self.binaryOperation(ctx, .op_subtract),
+            .op_multiply => try self.binaryOperation(ctx, .op_multiply),
+            .op_divide => try self.binaryOperation(ctx, .op_divide),
             .op_not => try self.notOperation(),
             .op_negate => try self.negateOperation(ctx),
             .op_return => {
@@ -108,8 +114,8 @@ pub fn run(self: *VM, gpa: Allocator, ctx: *Context) VMError!void {
                 try value.print(ctx.stream.out);
             },
             .op_pop => _ = self.stack.pop() orelse return error.UndefinedValue,
-            .op_define_global => try self.defineVariable(gpa, self.readIndex()),
-            .op_define_global_long => try self.defineVariable(gpa, self.readIndexLong()),
+            .op_define_global => try self.defineVariable(self.readIndex()),
+            .op_define_global_long => try self.defineVariable(self.readIndexLong()),
             .op_get_global => {
                 const index = self.readIndex();
                 if (index >= self.globals.items.len) {
@@ -197,21 +203,21 @@ fn readIndexLong(self: *VM) u32 {
     return index;
 }
 
-fn addOperation(self: *VM, gpa: Allocator, ctx: *Context) !void {
+fn addOperation(self: *VM, ctx: *Context) !void {
     const b = self.stack.get(self.stack.len() - 1) orelse return error.UndefinedValue;
     const a = self.stack.get(self.stack.len() - 2) orelse return error.UndefinedValue;
 
     if (b.isString() and a.isString()) {
-        try self.concatenate(gpa);
+        try self.concatenate();
     } else if (b.isNumber() and a.isNumber()) {
-        try self.binaryOperation(gpa, ctx, .op_add);
+        try self.binaryOperation(ctx, .op_add);
     } else {
         try self.runtimeError(ctx.stream.err, "Invalid Operands Type.", .{});
         return error.InvalidBinaryOperation;
     }
 }
 
-fn binaryOperation(self: *VM, gpa: Allocator, ctx: *Context, code: Chunk.Code) !void {
+fn binaryOperation(self: *VM, ctx: *Context, code: Chunk.Code) !void {
     const b = self.stack.pop() orelse return error.UndefinedValue;
     if (!b.isNumber()) {
         try self.runtimeError(ctx.stream.err, "Operand must be a number.", .{});
@@ -236,7 +242,7 @@ fn binaryOperation(self: *VM, gpa: Allocator, ctx: *Context, code: Chunk.Code) !
             return error.InvalidBinaryOperation;
         },
     };
-    try self.stack.push(gpa, result);
+    try self.stack.push(self.allocator, result);
 }
 
 fn negateOperation(self: *VM, ctx: *Context) !void {
@@ -261,16 +267,16 @@ fn notOperation(self: *VM) !void {
     self.stack.set(last_index, .{ .boolean = last.isFalsey() });
 }
 
-fn defineVariable(self: *VM, gpa: Allocator, index: u32) !void {
+fn defineVariable(self: *VM, index: u32) !void {
     if (index >= self.globals.items.len) {
         const count = (index + 1) - self.globals.items.len;
-        try self.globals.appendNTimes(gpa, .nil, count);
+        try self.globals.appendNTimes(self.allocator, .nil, count);
     }
     self.globals.items[@intCast(index)] = self.stack.peek();
     _ = self.stack.pop() orelse return error.UndefinedValue;
 }
 
-fn concatenate(self: *VM, gpa: Allocator) !void {
+fn concatenate(self: *VM) !void {
     // It does not own the ownership.
     const b = self.stack.pop() orelse return error.UndefinedValue;
     // It does not own the ownership.
@@ -280,17 +286,17 @@ fn concatenate(self: *VM, gpa: Allocator) !void {
         const a_str = a.object.getParentPtr(String);
         const b_str = b.object.getParentPtr(String);
 
-        const concat = try mem.concat(gpa, u8, &.{ a_str.slice(), b_str.slice() });
-        errdefer gpa.free(concat);
+        const concat = try mem.concat(self.allocator, u8, &.{ a_str.slice(), b_str.slice() });
+        errdefer self.allocator.free(concat);
 
         const gop = try self.strings.getOrPut(concat);
         if (gop.found_existing) {
             // It has found a same string.
-            gpa.free(concat);
+            self.allocator.free(concat);
         } else {
             // NOTE: Use imperative way for readability.
-            const string_object = try gpa.create(String);
-            errdefer gpa.destroy(string_object);
+            const string_object = try self.allocator.create(String);
+            errdefer self.allocator.destroy(string_object);
 
             string_object.* = .init(.owned, concat, Object{
                 .kind = .string,
@@ -303,7 +309,7 @@ fn concatenate(self: *VM, gpa: Allocator) !void {
         }
 
         const head = &gop.value_ptr.*.head;
-        try self.stack.push(gpa, .{ .object = head });
+        try self.stack.push(self.allocator, .{ .object = head });
     } else {
         return error.InvalidBinaryOperation;
     }
@@ -448,10 +454,10 @@ fn testCompile(source: [:0]const u8, expected: []const u8) !void {
 
     var ctx: Context = .init(undefined, .{ .out = &stream.writer, .err = &stream.writer });
 
-    var vm: VM = try .initCapacity(gpa, 256);
-    defer vm.deinit(gpa);
+    var vm: VM = try .init(gpa, 256);
+    defer vm.deinit();
 
-    try vm.interpret(gpa, &ctx, source);
+    try vm.interpret(&ctx, source);
     try testing.expectEqualSlices(u8, expected, stream.written());
 }
 
