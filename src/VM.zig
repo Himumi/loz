@@ -167,19 +167,19 @@ pub fn run(self: *VM, ctx: *Context) VMError!void {
             },
             .op_get_global => {
                 const index = self.readIndex();
-                try self.getVariable(index);
+                try self.getGlobalVariable(index);
             },
             .op_get_global_long => {
                 const index = self.readIndexLong();
-                try self.getVariable(index);
+                try self.getGlobalVariable(index);
             },
             .op_set_global => {
                 const index = self.readIndex();
-                try self.setVariable(index);
+                try self.setGlobalVariable(index);
             },
             .op_set_global_long => {
                 const index = self.readIndexLong();
-                try self.setVariable(index);
+                try self.setGlobalVariable(index);
             },
             .op_get_local => {
                 const index = self.readIndex();
@@ -301,14 +301,14 @@ fn defineVariable(self: *VM, index: u32) !void {
     _ = self.stack.pop() orelse return error.UndefinedValue;
 }
 
-fn getVariable(self: *VM, index: u32) !void {
+fn getGlobalVariable(self: *VM, index: u32) !void {
     if (index >= self.globals.items.len) {
         return error.UndefinedValue;
     }
     try self.stack.push(self.allocator, self.globals.items[@intCast(index)]);
 }
 
-fn setVariable(self: *VM, index: u32) !void {
+fn setGlobalVariable(self: *VM, index: u32) !void {
     if (index >= self.globals.items.len) {
         return error.UndefinedValue;
     }
