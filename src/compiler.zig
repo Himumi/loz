@@ -260,20 +260,7 @@ pub const Compiler = struct {
     fn identifierConstant(self: *Compiler, token: Token) !u32 {
         const lexeme = token.lexeme(self.source);
 
-        const gop = try self.strings.getOrPut(lexeme);
-        if (!gop.found_existing) {
-            const string_object = try self.allocator.create(String);
-            errdefer self.allocator.destroy(string_object);
-
-            string_object.* = .init(.@"const", lexeme, Object{
-                .kind = .string,
-                .next = null,
-            });
-
-            gop.value_ptr.* = string_object;
-        }
-
-        const head = &gop.value_ptr.*.head;
+        const head = try self.putToStrings(lexeme);
         return try self.makeConstant(.{ .object = head });
     }
 
@@ -537,21 +524,7 @@ pub const Compiler = struct {
         const lexeme = self.previous.lexeme(self.source);
         const str = lexeme[1 .. lexeme.len - 1];
 
-        const gop = try self.strings.getOrPut(str);
-        if (!gop.found_existing) {
-            // NOTE: Use imperative way for readability.
-            const string_object = try self.allocator.create(String);
-            errdefer self.allocator.destroy(string_object);
-
-            string_object.* = .init(.@"const", str, Object{
-                .kind = .string,
-                .next = null,
-            });
-
-            gop.value_ptr.* = string_object;
-        }
-
-        const head = &gop.value_ptr.*.head;
+        const head = try self.putToStrings(str);
         try self.emitConstant(.{ .object = head });
     }
 
@@ -805,6 +778,22 @@ pub const Compiler = struct {
             }
             try self.emitByte(.op_pop);
         }
+    }
+
+    fn putToStrings(self: *Compiler, str: []const u8) !*Object {
+        const gop = try self.strings.getOrPut(str);
+        if (!gop.found_existing) {
+            const string_object = try self.allocator.create(String);
+            errdefer self.allocator.destroy(string_object);
+
+            string_object.* = .init(.@"const", str, Object{
+                .kind = .string,
+                .next = null,
+            });
+
+            gop.value_ptr.* = string_object;
+        }
+        return &gop.value_ptr.*.head;
     }
 
     fn sync(self: *Compiler) CompilerError!void {
